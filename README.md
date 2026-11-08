@@ -194,3 +194,13 @@ O serviço roda sob a sessão do systemd do usuário:
   ```bash
   systemctl --user restart wallpapersync.service
   ```
+
+- **Desinstalar apenas o serviço em segundo plano (systemd)**:
+  ```bash
+  python3 sync_theme.py --uninstall-service
+  ```
+
+- **Desinstalação completa (remove serviços, temas gerados, paletas e restaura aplicativos)**:
+  ```bash
+  python3 sync_theme.py --uninstall
+  ```

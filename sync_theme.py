@@ -364,10 +364,12 @@ def sync_gnome_accent_color(accent: str) -> bool:
         gi.require_version("Gio", "2.0")
         from gi.repository import Gio
         iface = Gio.Settings.new("org.gnome.desktop.interface")
-        if "accent-color" in iface.list_keys():
+        try:
             if iface.get_string("accent-color") != gnome_color:
                 iface.set_string("accent-color", gnome_color)
                 return True
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1495,6 +1497,129 @@ WantedBy=default.target
     print("  systemctl --user enable --now wallpapersync.service")
 
 
+def uninstall_user_service():
+    """Para, desativa e remove os serviços systemd --user do WallpaperSync."""
+    print("[*] Parando e removendo serviços systemd do usuário...")
+    service_names = ["wallpapersync.service", "chromaleon-discord-sync.service"]
+    for sname in service_names:
+        subprocess.run(["systemctl", "--user", "stop", sname], check=False, capture_output=True)
+        subprocess.run(["systemctl", "--user", "disable", sname], check=False, capture_output=True)
+
+    service_dir = Path.home() / ".config" / "systemd" / "user"
+    for sname in service_names:
+        sfile = service_dir / sname
+        if sfile.exists() or sfile.is_symlink():
+            try:
+                sfile.unlink(missing_ok=True)
+                print(f"  [✓] Removido: {sfile}")
+            except Exception as e:
+                print(f"  [!] Erro ao remover {sfile}: {e}")
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, capture_output=True)
+    subprocess.run(["systemctl", "--user", "reset-failed"], check=False, capture_output=True)
+    print("[✓] Serviço systemd removido com sucesso.")
+
+
+def uninstall_all():
+    """
+    Desinstalação completa do WallpaperSync:
+    1. Para e remove o serviço systemd.
+    2. Remove os links de temas no Discord/Equibop.
+    3. Remove as paletas geradas do Ptyxis e restaura o perfil para 'gnome'.
+    4. Remove as seções de paleta do starship.toml.
+    5. Remove o userChrome.css dinâmico dos perfis do Firefox.
+    """
+    print("==================================================")
+    print("      WallpaperSync — Desinstalação Completa      ")
+    print("==================================================")
+
+    # 1. Serviços systemd
+    print("\n[1/5] Parando e desabilitando serviços systemd...")
+    uninstall_user_service()
+
+    # 2. Discord / Equibop
+    print("\n[2/5] Removendo temas do Discord / Equibop...")
+    for ddir in get_discord_theme_dirs():
+        for fname in ["system24.theme.css", "midnight.theme.css"]:
+            tpath = ddir / fname
+            if tpath.is_symlink() or tpath.exists():
+                try:
+                    tpath.unlink(missing_ok=True)
+                    print(f"  [✓] Removido: {tpath}")
+                except Exception as e:
+                    print(f"  [!] Erro ao remover {tpath}: {e}")
+
+    # 3. Ptyxis Terminal
+    print("\n[3/5] Restaurando paletas do terminal Ptyxis...")
+    palette_files = [
+        PTYXIS_PALETTES_DIR / "wallpapersync.palette",
+        PTYXIS_PALETTES_DIR / "chromaleon.palette",
+        Path.home() / ".var" / "app" / "org.gnome.Ptyxis" / "data" / "ptyxis" / "palettes" / "wallpapersync.palette",
+        Path.home() / ".var" / "app" / "org.gnome.Ptyxis" / "data" / "ptyxis" / "palettes" / "chromaleon.palette",
+        Path.home() / ".var" / "app" / "org.gnome.Ptyxis" / "data" / "org.gnome.Ptyxis" / "palettes" / "wallpapersync.palette",
+        Path.home() / ".var" / "app" / "org.gnome.Ptyxis" / "data" / "org.gnome.Ptyxis" / "palettes" / "chromaleon.palette",
+        Path.home() / ".var" / "app" / "app.devsuite.Ptyxis" / "data" / "ptyxis" / "palettes" / "wallpapersync.palette",
+        Path.home() / ".var" / "app" / "app.devsuite.Ptyxis" / "data" / "ptyxis" / "palettes" / "chromaleon.palette",
+    ]
+    for pf in palette_files:
+        if pf.exists() or pf.is_symlink():
+            try:
+                pf.unlink(missing_ok=True)
+                print(f"  [✓] Removida paleta: {pf}")
+            except Exception as e:
+                print(f"  [!] Erro ao remover {pf}: {e}")
+
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio
+        ptyxis = Gio.Settings.new("org.gnome.Ptyxis")
+        default_uuid = ptyxis.get_string("default-profile-uuid")
+        profile_uuids = {default_uuid} if default_uuid else set()
+        try:
+            for u in ptyxis.get_strv("profile-uuids"):
+                profile_uuids.add(u)
+        except Exception:
+            pass
+        for u in profile_uuids:
+            try:
+                profile = Gio.Settings.new_with_path("org.gnome.Ptyxis.Profile", f"/org/gnome/Ptyxis/Profiles/{u}/")
+                if profile.get_string("palette") in ("wallpapersync", "chromaleon"):
+                    profile.set_string("palette", "gnome")
+                    print(f"  [✓] Perfil Ptyxis restaurado para paleta padrão 'gnome'")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 4. Starship Prompt
+    print("\n[4/5] Restaurando ~/.config/starship.toml...")
+    if STARSHIP_TOML.exists():
+        try:
+            txt = STARSHIP_TOML.read_text(encoding="utf-8")
+            new_txt = re.sub(r"\n*\[palettes\.(?:wallpapersync|chromaleon)\][\s\S]*?(?=\n\[|$)", "", txt)
+            new_txt = re.sub(r"^\s*palette\s*=\s*['\"](?:wallpapersync|chromaleon)['\"]\n?", "", new_txt, flags=re.MULTILINE)
+            STARSHIP_TOML.write_text(new_txt.strip() + "\n" if new_txt.strip() else "", encoding="utf-8")
+            print("  [✓] Seções de paleta do WallpaperSync removidas do starship.toml")
+        except Exception as e:
+            print(f"  [!] Erro ao limpar starship.toml: {e}")
+
+    # 5. Firefox
+    print("\n[5/5] Restaurando temas do Firefox...")
+    for pdir in get_firefox_profile_dirs():
+        chrome_file = pdir / "chrome" / "userChrome.css"
+        if chrome_file.exists():
+            try:
+                txt = chrome_file.read_text(encoding="utf-8", errors="ignore")
+                if "WallpaperSync" in txt:
+                    chrome_file.unlink(missing_ok=True)
+                    print(f"  [✓] Removido userChrome.css em: {pdir.name}")
+            except Exception as e:
+                print(f"  [!] Erro ao remover userChrome.css em {pdir}: {e}")
+
+    print("\n[✓] Desinstalação concluída com sucesso! Os aplicativos foram restaurados aos seus padrões.")
+
+
 # ==============================================================================
 # 7. INTERFACE DE LINHA DE COMANDO (CLI)
 # ==============================================================================
@@ -1519,6 +1644,12 @@ def main():
         "--install-service", action="store_true", help="Instala e configura o serviço systemd do usuário."
     )
     parser.add_argument(
+        "--uninstall-service", action="store_true", help="Desativa e remove o serviço systemd do usuário."
+    )
+    parser.add_argument(
+        "--uninstall", action="store_true", help="Desinstalação completa: remove serviços, temas gerados, paletas e restaura aplicativos."
+    )
+    parser.add_argument(
         "--info", action="store_true", help="Exibe informações do papel de parede e cores detectadas."
     )
     parser.add_argument(
@@ -1527,7 +1658,11 @@ def main():
 
     args = parser.parse_args()
 
-    if args.install_service:
+    if args.uninstall:
+        uninstall_all()
+    elif args.uninstall_service:
+        uninstall_user_service()
+    elif args.install_service:
         install_user_service()
     elif args.info:
         wp = Path(args.image) if args.image else get_current_wallpaper_path()
@@ -1550,6 +1685,8 @@ def main():
         print(f"  python3 {SCRIPT_DIR / 'sync_theme.py'} --watch")
         print("\nPara instalar como serviço de inicialização automática no sistema:")
         print(f"  python3 {SCRIPT_DIR / 'sync_theme.py'} --install-service")
+        print("\nPara desinstalar completamente e restaurar aplicativos:")
+        print(f"  python3 {SCRIPT_DIR / 'sync_theme.py'} --uninstall")
 
 
 if __name__ == "__main__":
