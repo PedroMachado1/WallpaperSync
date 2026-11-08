@@ -1,0 +1,106 @@
+/* WallpaperSync — Tema Dinâmico para Firefox (ChromaLeon) */
+/* Gerado automaticamente pelo sync_theme.py — NÃO EDITE MANUALMENTE */
+
+:root {
+  /* Cores Base e Destaque */
+  --accent-color: #0283de !important;
+  --accent-color-light: #20a2fd !important;
+  --focus-outline-color: #0283de !important;
+
+  /* Barra de Título / Cabeçalho da Janela */
+  --lwt-accent-color: #0d1924 !important;
+  --lwt-accent-color-inactive: #0d1924 !important;
+
+  /* Barra de Navegação e Ferramentas */
+  --toolbar-bgcolor: #132433 !important;
+  --toolbar-color: #f4f6fa !important;
+
+  /* Barra de Endereços (URL Bar) */
+  --toolbar-field-background-color: #09141d !important;
+  --toolbar-field-color: #f4f6fa !important;
+  --toolbar-field-focus-background-color: #09141d !important;
+  --toolbar-field-focus-color: #ffffff !important;
+  --toolbar-field-focus-border-color: #0283de !important;
+
+  /* Abas */
+  --tab-selected-bgcolor: #192e41 !important;
+  --tab-selected-textcolor: #ffffff !important;
+  --lwt-selected-tab-background-color: #192e41 !important;
+  --lwt-tab-line-color: #0283de !important;
+
+  /* Painel Lateral / Barra Lateral / Abas Verticais */
+  --lwt-sidebar-background-color: #0d1924 !important;
+  --lwt-sidebar-text-color: #f4f6fa !important;
+  --sidebar-background-color: #0d1924 !important;
+  --sidebar-text-color: #f4f6fa !important;
+}
+
+/* Área superior de ferramentas e abas */
+#navigator-toolbox {
+  background-color: #0d1924 !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+}
+
+#TabsToolbar {
+  background-color: #0d1924 !important;
+}
+
+/* Barra de Navegação */
+#nav-bar {
+  background-color: #132433 !important;
+  box-shadow: none !important;
+}
+
+/* Barra de Favoritos */
+#PersonalToolbar {
+  background-color: #132433 !important;
+  color: #f4f6fa !important;
+}
+
+/* Barra de Endereços (URL Bar) */
+#urlbar-background {
+  background-color: #09141d !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 8px !important;
+}
+
+#urlbar[focused="true"] > #urlbar-background {
+  border-color: #0283de !important;
+  box-shadow: 0 0 0 2px rgba(2, 131, 222, 0.25) !important;
+}
+
+/* Abas Ativas (Horizontais e Verticais) */
+.tabbrowser-tab[selected] .tab-background {
+  background-color: #192e41 !important;
+  border-radius: 8px !important;
+  box-shadow: inset 0 0 0 1px rgba(2, 131, 222, 0.35) !important;
+}
+
+/* Indicador de linha na aba ativa */
+.tab-line[selected="true"] {
+  background-color: #0283de !important;
+}
+
+/* Abas em Hover */
+.tabbrowser-tab:hover:not([selected]) .tab-background {
+  background-color: #213448 !important;
+  border-radius: 8px !important;
+}
+
+/* Botões da barra em Hover */
+toolbarbutton.bookmark-item:hover,
+.toolbarbutton-1:hover {
+  background-color: rgba(2, 131, 222, 0.15) !important;
+}
+
+/* Suporte à Barra Lateral e Abas Verticais */
+#sidebar-box,
+#sidebar-main,
+#vertical-tabs {
+  background-color: #0d1924 !important;
+  border-right: 1px solid rgba(255, 255, 255, 0.06) !important;
+}
+
+#vertical-tabs .tabbrowser-tab[selected] .tab-background {
+  box-shadow: inset 3px 0 0 0 #0283de !important;
+}

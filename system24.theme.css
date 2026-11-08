@@ -1,0 +1,233 @@
+/**
+ * @name system24 (WallpaperSync Material You)
+ * @description Tema sincronizado dinamicamente com o wallpaper no estilo Material Design 3 / Material You.
+ * @author refact0r (Adaptado para Material You por WallpaperSync)
+*/
+
+@import url('https://refact0r.github.io/system24/build/system24.css');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+body {
+    /* Tipografia fluida e legível Material You */
+    --font: 'Inter', 'Figtree', 'Google Sans', system-ui, -apple-system, sans-serif;
+    --code-font: 'JetBrains Mono', 'DM Mono', monospace;
+    font-weight: 400;
+    letter-spacing: -0.01ch;
+
+    /* Espaçamento e Geometria M3 */
+    --gap: 14px;
+    --border-thickness: 1px;
+    --divider-thickness: 3px;
+    --border-hover-transition: 0.25s cubic-bezier(0.2, 0, 0, 1);
+
+    /* Formas Arredondadas Expressivas (Material You) */
+    --unrounding: off;
+    --round-pfp: on;
+
+    /* Desativa elementos de TUI para visual limpo */
+    --panel-labels: off;
+    --ascii-titles: off;
+    --ascii-loader: off;
+
+    /* Chatbar em cápsula flutuante separada */
+    --custom-chatbar: separated;
+    --chatbar-height: 54px;
+
+    /* Design Tokens de Curvatura do Material 3 */
+    --radius-sm: 8px;
+    --radius-md: 14px;
+    --radius-lg: 20px;
+    --radius-xl: 26px;
+    --radius-round: 9999px;
+}
+
+:root {
+    --colors: on;
+
+    /* Variáveis Tonal M3 */
+    --accent-rgb: 30, 144, 255;
+    --outline: rgba(255, 255, 255, 0.08);
+    --outline-variant: rgba(30, 144, 255, 0.22);
+    --primary-container: #204e7c;
+
+    /* Cores de Texto (Paleta M3 On-Surface de alto contraste) */
+    --text-1: #f8f3f8;
+    --text-2: #ece5ec;
+    --text-3: #cac3ce;
+    --text-4: #958f99;
+    --text-5: #7a747d;
+
+    /* Fundo Tonal Material You (Extraído do Wallpaper) */
+    --bg-4: #132232;
+    --bg-3: #101f2f;
+    --bg-2: #213449;
+    --bg-1: #2e445f;
+
+    /* Cores de Destaque (Primary) */
+    --accent-1: #1e90ff;
+    --accent-2: #65b3ff;
+    --accent-3: #1e90ff;
+    --accent-4: #0077ea;
+    --accent-new: #84c2ff;
+
+    /* Interações com transição suave M3 */
+    --hover: rgba(30, 144, 255, 0.10);
+    --active: rgba(30, 144, 255, 0.20);
+    --border-hover: rgba(30, 144, 255, 0.35);
+
+    /* Status Indicators */
+    --online: #3dd68c;
+    --dnd: #ff5449;
+    --idle: #ffba28;
+    --offline: #7a747d;
+}
+
+/* ===================================================
+   REGRAS VISUAIS: MATERIAL YOU (MATERIAL DESIGN 3)
+   =================================================== */
+
+/* 1. Painéis com cantos amplos (20px), superfícies tonais e elevação suave */
+.guilds__5e434,
+.sidebarList__5e434,
+.panels__5e434,
+.chatContent_f75fb0,
+.container_c8ffbb,
+.channelTextArea_f75fb0,
+.container__8a031,
+.peopleColumn__133bf {
+    border-radius: 20px !important;
+    border: 1px solid var(--outline) !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2) !important;
+    transition: all 0.25s cubic-bezier(0.2, 0, 0, 1) !important;
+}
+
+.guilds__5e434:hover,
+.sidebarList__5e434:hover,
+.panels__5e434:hover,
+.chatContent_f75fb0:hover,
+.container_c8ffbb:hover {
+    border-color: var(--outline-variant) !important;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28) !important;
+}
+
+/* 2. Barra de digitação flutuante em formato de pílula M3 (Pill Bar) */
+.channelTextArea_f75fb0 {
+    border-radius: 28px !important;
+    background-color: var(--bg-2) !important;
+    border: 1.5px solid var(--outline) !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
+    padding: 0 4px !important;
+}
+
+.channelTextArea_f75fb0:focus-within {
+    border-color: var(--accent-1) !important;
+    box-shadow: 0 4px 20px rgba(var(--accent-rgb), 0.22) !important;
+}
+
+.scrollableContainer__74017 {
+    border-radius: 24px !important;
+    background: transparent !important;
+}
+
+/* 3. Lista de canais estilo Navigation Drawer do Android */
+.wrapper__2ea32 {
+    border-radius: 20px !important;
+    margin: 2px 8px !important;
+    padding: 0 8px !important;
+    transition: all 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
+}
+
+.wrapper__2ea32.modeSelected__2ea32 {
+    background-color: var(--primary-container) !important;
+}
+
+.wrapper__2ea32.modeSelected__2ea32 .name__2ea32 {
+    color: var(--text-1) !important;
+    font-weight: 600 !important;
+}
+
+.wrapper__2ea32:hover:not(.modeSelected__2ea32) {
+    background-color: var(--hover) !important;
+}
+
+/* 4. Mensagens com cantos suaves e margem fluida */
+.message__5126c {
+    border-radius: 14px !important;
+    margin: 2px 12px !important;
+    transition: background-color 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
+}
+
+.mentioned__5126c {
+    background: var(--primary-container) !important;
+    border-left: 4px solid var(--accent-1) !important;
+    border-radius: 6px 14px 14px 6px !important;
+}
+
+/* 5. Reações em formato de pílulas / chips */
+.reaction_f8896c {
+    border-radius: 16px !important;
+    border: 1px solid var(--outline) !important;
+    background: var(--bg-2) !important;
+    transition: all 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
+}
+
+.reaction_f8896c.reactionMe_f8896c {
+    background-color: var(--primary-container) !important;
+    border-color: var(--accent-1) !important;
+}
+
+/* 6. Botões em pílulas (Material Filled / Tonal Buttons) */
+button,
+.lookFilled__201d5,
+.button__201d5 {
+    border-radius: 24px !important;
+    font-weight: 500 !important;
+    transition: all 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
+}
+
+.numberBadge__2b1f5,
+.badge__9293f {
+    border-radius: 9999px !important;
+    font-weight: 600 !important;
+    background-color: var(--accent-1) !important;
+    color: #ffffff !important;
+    box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.3) !important;
+}
+
+/* 7. Avatares circulares e suaves */
+.wrapper__44b0c foreignObject,
+.avatar_c19a55 {
+    border-radius: 50% !important;
+}
+
+/* 8. Modais, Popovers e Menus (Material Dialogs) */
+.menu_c1e9c4,
+.messagesPopoutWrap_b35704,
+.root_f9a4c9,
+.container__8a031 {
+    border-radius: 24px !important;
+    border: 1px solid var(--outline) !important;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5) !important;
+    background-color: var(--bg-1) !important;
+}
+
+.item_c1e9c4 {
+    border-radius: 16px !important;
+    margin: 2px 6px !important;
+}
+
+/* 9. Scrollbar fluida em pílula */
+::-webkit-scrollbar {
+    width: 6px !important;
+    height: 6px !important;
+}
+::-webkit-scrollbar-thumb {
+    background: var(--outline-variant) !important;
+    border-radius: 9999px !important;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-1) !important;
+}
+::-webkit-scrollbar-track {
+    background: transparent !important;
+}
