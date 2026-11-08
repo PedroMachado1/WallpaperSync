@@ -83,10 +83,10 @@ body {
     --text-5: #475061;
 
     /* background and dark colors (Tinted Dark) */
-    --bg-1: #243c5c;
-    --bg-2: #1a2e46;
-    --bg-3: #0d1d2e;
-    --bg-4: #112132;
+    --bg-1: #243852;
+    --bg-2: #1a2a3e;
+    --bg-3: #0d1927;
+    --bg-4: #101d2b;
     --hover: rgba(30, 144, 255, 0.10);
     --active: rgba(30, 144, 255, 0.20);
     --active-2: rgba(30, 144, 255, 0.30);

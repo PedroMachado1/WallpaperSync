@@ -48,7 +48,7 @@ body {
     --accent-rgb: 30, 144, 255;
     --outline: rgba(255, 255, 255, 0.08);
     --outline-variant: rgba(30, 144, 255, 0.22);
-    --primary-container: #204e7c;
+    --primary-container: #214b76;
 
     /* Cores de Texto (Paleta M3 On-Surface de alto contraste) */
     --text-1: #f8f3f8;
@@ -58,10 +58,10 @@ body {
     --text-5: #7a747d;
 
     /* Fundo Tonal Material You (Extraído do Wallpaper) */
-    --bg-4: #132232;
-    --bg-3: #101f2f;
-    --bg-2: #213449;
-    --bg-1: #2e445f;
+    --bg-4: #121e2b;
+    --bg-3: #101b28;
+    --bg-2: #223041;
+    --bg-1: #2f4056;
 
     /* Cores de Destaque (Primary) */
     --accent-1: #1e90ff;

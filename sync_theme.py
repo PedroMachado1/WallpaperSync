@@ -425,30 +425,19 @@ color_red = '#ff5449'
 color_yellow = '{c_yellow}'"""
 
         content = STARSHIP_TOML.read_text(encoding="utf-8")
-        content = re.sub(r"palette\s*=\s*['\"].*?['\"]", "palette = 'wallpapersync'", content)
 
-        # Atualiza blocos de paleta existentes ou insere novo
-        if "[palettes.wallpapersync]" in content:
-            content = re.sub(
-                r"\[palettes\.wallpapersync\][\s\S]*?(?=\n\[|$)",
-                palette_block + "\n",
-                content,
-            )
-        elif "[palettes.chromaleon]" in content:
-            content = re.sub(
-                r"\[palettes\.chromaleon\][\s\S]*?(?=\n\[|$)",
-                palette_block + "\n",
-                content,
-            )
-        elif "[palettes." in content:
-            content = re.sub(
-                r"(\[palettes\.[^\]]+\][\s\S]*?)(?=\n\[(?!palettes)|$)",
-                r"\1\n" + palette_block + "\n",
-                content,
-                count=1,
-            )
+        # 1. Define a paleta ativa como wallpapersync
+        if re.search(r"^\s*palette\s*=", content, re.MULTILINE):
+            content = re.sub(r"palette\s*=\s*['\"].*?['\"]", "palette = 'wallpapersync'", content)
         else:
-            content += "\n" + palette_block + "\n"
+            content = "palette = 'wallpapersync'\n" + content
+
+        # 2. Remove qualquer ocorrência anterior de wallpapersync e chromaleon
+        # (remove inclusive duplicatas pré-existentes para corrigir o arquivo do usuário)
+        content = re.sub(r"\n*\[palettes\.(?:wallpapersync|chromaleon)\][\s\S]*?(?=\n\[|$)", "", content)
+
+        # 3. Anexa os blocos de paleta de forma limpa e idempotente
+        content = content.rstrip() + "\n\n" + palette_block + "\n"
 
         STARSHIP_TOML.write_text(content, encoding="utf-8")
         return True
