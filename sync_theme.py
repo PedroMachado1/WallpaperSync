@@ -14,9 +14,16 @@ e sincroniza os temas dos seguintes aplicativos:
 import os
 import re
 import sys
+import json
 import time
+import fcntl
+import shutil
+import struct
+import hashlib
 import colorsys
 import argparse
+import tempfile
+import threading
 import subprocess
 import urllib.parse
 from pathlib import Path
@@ -28,6 +35,17 @@ MIDNIGHT_THEME = SCRIPT_DIR / "midnight.theme.css"
 FIREFOX_THEME = SCRIPT_DIR / "firefox-userChrome.css"
 STARSHIP_TOML = Path.home() / ".config" / "starship.toml"
 PTYXIS_PALETTES_DIR = Path.home() / ".local" / "share" / "org.gnome.Ptyxis" / "palettes"
+
+# Configurações de estabilidade, debounce e bloqueio de transações RPM/DNF
+DEBOUNCE_SECONDS = 2.0
+RPM_WAIT_POLL_SECONDS = 2.0
+RPM_WAIT_TIMEOUT_SECONDS = 600.0
+RPM_LOCK_PATHS = (
+    Path("/var/lib/rpm/.rpm.lock"),
+    Path("/usr/lib/sysimage/rpm/.rpm.lock"),
+    Path("/run/dnf/rpm.lock"),
+)
+PACKAGE_MANAGER_PROCESS_NAMES = frozenset({"dnf", "dnf-3", "dnf5", "yum", "rpm"})
 
 
 # ==============================================================================
@@ -133,60 +151,84 @@ def resolve_wallpaper_path(path: Path | None) -> Path | None:
     return path.resolve() if path.is_symlink() else path
 
 
+def _parse_gsettings_value(raw: str) -> str:
+    """Normaliza a saída textual do comando `gsettings get` removendo aspas externas."""
+    val = raw.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+        val = val[1:-1]
+    return val
+
+
+def gsettings_get(schema: str, key: str, timeout: float = 3.0) -> str | None:
+    """Lê o valor real atual via `gsettings get`. Retorna None se indisponível ou em erro."""
+    try:
+        res = subprocess.run(
+            ["gsettings", "get", schema, key],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        if res.returncode == 0:
+            return _parse_gsettings_value(res.stdout)
+        return None
+    except FileNotFoundError:
+        try:
+            import gi
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio
+            settings = Gio.Settings.new(schema)
+            return settings.get_string(key)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def gsettings_set(schema: str, key: str, value: str, timeout: float = 3.0) -> bool:
+    """Define um valor via `gsettings set`, retornando True em caso de sucesso."""
+    try:
+        res = subprocess.run(
+            ["gsettings", "set", schema, key, value],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        return res.returncode == 0
+    except FileNotFoundError:
+        try:
+            import gi
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio
+            settings = Gio.Settings.new(schema)
+            return bool(settings.set_string(key, value))
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
 def get_current_wallpaper_path() -> Path | None:
     """
     Detecta o papel de parede ativo no GNOME (Dark/Light) e em outros ambientes.
-    Suporta GSettings via Gio e via CLI subprocess.
+    Prioriza leitura real via `gsettings get` e usa fallbacks locais.
     """
-    # 1. Tenta via PyGObject (Gio.Settings) se disponível
-    try:
-        import gi
-        gi.require_version("Gio", "2.0")
-        from gi.repository import Gio
+    # 1. Tenta via comando real `gsettings get` do sistema
+    color_scheme = gsettings_get("org.gnome.desktop.interface", "color-scheme")
+    is_dark = "dark" in (color_scheme or "prefer-dark").lower()
+    keys = ["picture-uri-dark", "picture-uri"] if is_dark else ["picture-uri", "picture-uri-dark"]
+    for k in keys:
+        uri = gsettings_get("org.gnome.desktop.background", k)
+        if uri:
+            p = uri_to_path(uri)
+            if p and p.exists():
+                return resolve_wallpaper_path(p)
 
-        is_dark = True
-        try:
-            iface = Gio.Settings.new("org.gnome.desktop.interface")
-            color_scheme = iface.get_string("color-scheme")
-            is_dark = "dark" in color_scheme.lower()
-        except Exception:
-            pass
-
-        bg = Gio.Settings.new("org.gnome.desktop.background")
-        keys = ["picture-uri-dark", "picture-uri"] if is_dark else ["picture-uri", "picture-uri-dark"]
-        for k in keys:
-            try:
-                uri = bg.get_string(k)
-                p = uri_to_path(uri)
-                if p and p.exists():
-                    return resolve_wallpaper_path(p)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # 2. Tenta via comando gsettings do sistema
-    try:
-        is_dark = True
-        res_scheme = subprocess.run(
-            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
-            capture_output=True, text=True, check=False, timeout=2,
-        )
-        if res_scheme.returncode == 0:
-            is_dark = "dark" in res_scheme.stdout.lower()
-
-        keys = ["picture-uri-dark", "picture-uri"] if is_dark else ["picture-uri", "picture-uri-dark"]
-        for k in keys:
-            res = subprocess.run(
-                ["gsettings", "get", "org.gnome.desktop.background", k],
-                capture_output=True, text=True, check=False, timeout=2,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                p = uri_to_path(res.stdout.strip())
-                if p and p.exists():
-                    return resolve_wallpaper_path(p)
-    except Exception:
-        pass
+    # 2. Fallback para arquivo padrão ~/.config/background do GNOME
+    gnome_bg = Path.home() / ".config" / "background"
+    if gnome_bg.exists():
+        return resolve_wallpaper_path(gnome_bg)
 
     # 3. Fallback para feh (.fehbg)
     fehbg = Path.home() / ".fehbg"
@@ -219,6 +261,240 @@ def get_current_wallpaper_path() -> Path | None:
                 return resolve_wallpaper_path(latest)
 
     return None
+
+
+# ==============================================================================
+# 2B. CACHE DE ESTADO, IDEMPOTÊNCIA E BLOQUEIO DURANTE TRANSAÇÕES DNF / RPM
+# ==============================================================================
+
+def get_state_file_path() -> Path:
+    """Retorna o caminho do arquivo de estado em $XDG_RUNTIME_DIR/wallpapersync.state."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        return Path(runtime_dir) / "wallpapersync.state"
+    run_user = Path(f"/run/user/{os.getuid()}")
+    if run_user.is_dir():
+        return run_user / "wallpapersync.state"
+    return Path(tempfile.gettempdir()) / f"wallpapersync-{os.getuid()}.state"
+
+
+def compute_file_sha256(path: Path | None) -> str | None:
+    """Calcula o hash SHA-256 do arquivo de wallpaper."""
+    if not path:
+        return None
+    try:
+        if not path.is_file():
+            return None
+        hasher = hashlib.sha256()
+        with path.open("rb") as f:
+            while chunk := f.read(65536):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception:
+        return None
+
+
+def collect_current_state(wallpaper_path: Path | str | None = None) -> dict:
+    """
+    Coleta o estado real atual do desktop via `gsettings get` e calcula o
+    hash SHA-256 do papel de parede ativo.
+    """
+    color_scheme = gsettings_get("org.gnome.desktop.interface", "color-scheme")
+    picture_uri = gsettings_get("org.gnome.desktop.background", "picture-uri")
+    picture_uri_dark = gsettings_get("org.gnome.desktop.background", "picture-uri-dark")
+
+    if wallpaper_path:
+        active_wp = resolve_wallpaper_path(Path(wallpaper_path))
+    else:
+        active_wp = None
+        is_dark = "dark" in (color_scheme or "prefer-dark").lower()
+        ordered_uris = [picture_uri_dark, picture_uri] if is_dark else [picture_uri, picture_uri_dark]
+        for uri in ordered_uris:
+            if uri:
+                p = uri_to_path(uri)
+                if p and p.exists():
+                    active_wp = resolve_wallpaper_path(p)
+                    break
+        if active_wp is None:
+            active_wp = get_current_wallpaper_path()
+
+    return {
+        "wallpaper_sha256": compute_file_sha256(active_wp),
+        "wallpaper_path": str(active_wp) if active_wp else None,
+        "color_scheme": color_scheme,
+        "picture_uri": picture_uri,
+        "picture_uri_dark": picture_uri_dark,
+    }
+
+
+def load_saved_state(state_file: Path | None = None) -> dict | None:
+    """Carrega o último estado aplicado de $XDG_RUNTIME_DIR/wallpapersync.state."""
+    path = state_file or get_state_file_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def save_state(state: dict, state_file: Path | None = None) -> bool:
+    """Salva o estado aplicado de forma atômica em $XDG_RUNTIME_DIR/wallpapersync.state."""
+    path = state_file or get_state_file_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=".wallpapersync.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        return True
+    except Exception as e:
+        print(f"[!] Erro ao salvar estado em {path}: {e}")
+        return False
+
+
+def is_state_unchanged(current_state: dict, saved_state: dict | None) -> bool:
+    """
+    Compara o estado atual do sistema com o estado persistido em `.state`.
+    Retorna True somente se o wallpaper (SHA-256), color-scheme e URIs forem idênticos.
+    """
+    if not saved_state:
+        return False
+    if not current_state.get("wallpaper_sha256"):
+        return False
+    if not saved_state.get("accent_color"):
+        return False
+    if saved_state.get("wallpaper_sha256") != current_state.get("wallpaper_sha256"):
+        return False
+    if saved_state.get("color_scheme") != current_state.get("color_scheme"):
+        return False
+    if "picture_uri" in saved_state and saved_state.get("picture_uri") != current_state.get("picture_uri"):
+        return False
+    if "picture_uri_dark" in saved_state and saved_state.get("picture_uri_dark") != current_state.get("picture_uri_dark"):
+        return False
+    return True
+
+
+def _is_file_locked(lock_path: Path) -> bool:
+    """Verifica se um arquivo de lock possui bloqueio ativo via flock, fcntl(F_GETLK) ou fuser."""
+    if not lock_path.exists():
+        return False
+
+    try:
+        with lock_path.open("rb") as f:
+            fd = f.fileno()
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except BlockingIOError:
+                return True
+            except OSError:
+                pass
+
+            try:
+                flock_struct = struct.pack("hhlli", fcntl.F_WRLCK, os.SEEK_SET, 0, 0, 0)
+                res = fcntl.fcntl(fd, fcntl.F_GETLK, flock_struct)
+                l_type = struct.unpack("hhlli", res)[0]
+                if l_type != fcntl.F_UNLCK:
+                    return True
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+    fuser_bin = shutil.which("fuser")
+    if fuser_bin:
+        try:
+            res = subprocess.run(
+                [fuser_bin, str(lock_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def _has_active_package_manager_process() -> bool:
+    """Verifica no /proc se há processo dnf, dnf5, yum ou rpm em execução."""
+    proc_dir = Path("/proc")
+    if not proc_dir.is_dir():
+        return False
+
+    own_pid = str(os.getpid())
+    try:
+        entries = list(proc_dir.iterdir())
+    except OSError:
+        return False
+
+    for entry in entries:
+        pid = entry.name
+        if not pid.isdigit() or pid == own_pid:
+            continue
+        try:
+            comm = (entry / "comm").read_text(encoding="utf-8", errors="ignore").strip()
+            if comm in PACKAGE_MANAGER_PROCESS_NAMES:
+                return True
+
+            cmdline_raw = (entry / "cmdline").read_bytes()
+            if cmdline_raw:
+                args = [a.decode("utf-8", errors="ignore") for a in cmdline_raw.split(b"\x00") if a]
+                for arg in args[:2]:
+                    if Path(arg).name in PACKAGE_MANAGER_PROCESS_NAMES:
+                        return True
+        except OSError:
+            continue
+
+    return False
+
+
+def is_package_transaction_active() -> bool:
+    """Retorna True se houver transação de pacotes DNF/RPM em andamento."""
+    for lock_path in RPM_LOCK_PATHS:
+        if _is_file_locked(lock_path):
+            return True
+    if _has_active_package_manager_process():
+        return True
+    return False
+
+
+def wait_for_package_transaction(
+    poll_interval: float = RPM_WAIT_POLL_SECONDS,
+    timeout: float = RPM_WAIT_TIMEOUT_SECONDS,
+) -> bool:
+    """
+    Aguarda o término de qualquer transação RPM/DNF ativa antes de avaliar o
+    estado ou aplicar alterações. Retorna False apenas se exceder o timeout.
+    """
+    if not is_package_transaction_active():
+        return True
+
+    print("[*] Transação RPM/DNF em andamento. Aguardando término antes de avaliar estado...")
+    deadline = time.monotonic() + timeout
+    while is_package_transaction_active():
+        if time.monotonic() >= deadline:
+            print("[!] Tempo limite atingido aguardando término da transação RPM/DNF.")
+            return False
+        time.sleep(poll_interval)
+
+    print("[*] Transação RPM/DNF concluída. Prosseguindo com a verificação de estado...")
+    return True
 
 
 # ==============================================================================
@@ -357,36 +633,31 @@ def extract_wallpaper_colors(
 
 
 def sync_gnome_accent_color(accent: str) -> bool:
-    """Atualiza a cor de destaque nativa do GNOME 47+ para combinar com o wallpaper."""
+    """
+    Atualiza a cor de destaque nativa do GNOME 47+ somente se diferir do valor atual.
+    Executa obrigatoriamente `gsettings get` antes de qualquer `gsettings set`.
+    """
     gnome_color = map_hex_to_gnome_accent(accent)
-    try:
-        import gi
-        gi.require_version("Gio", "2.0")
-        from gi.repository import Gio
-        iface = Gio.Settings.new("org.gnome.desktop.interface")
-        try:
-            if iface.get_string("accent-color") != gnome_color:
-                iface.set_string("accent-color", gnome_color)
-                return True
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    try:
-        subprocess.run(
-            ["gsettings", "set", "org.gnome.desktop.interface", "accent-color", gnome_color],
-            check=False, capture_output=True, timeout=2,
-        )
-        return True
-    except Exception:
-        pass
-    return False
+    current_accent = gsettings_get("org.gnome.desktop.interface", "accent-color")
+    if current_accent is None or current_accent == gnome_color:
+        return False
+    return gsettings_set("org.gnome.desktop.interface", "accent-color", gnome_color)
 
 
 # ==============================================================================
 # 4. GERAÇÃO E ATUALIZAÇÃO DOS TEMAS DE APLICATIVOS
 # ==============================================================================
+
+def _write_text_if_changed(path: Path, content: str) -> bool:
+    """Escreve o arquivo apenas se o conteúdo diferir do já existente em disco."""
+    try:
+        if path.exists() and path.read_text(encoding="utf-8") == content:
+            return False
+    except Exception:
+        pass
+    path.write_text(content, encoding="utf-8")
+    return True
+
 
 def update_starship_theme(accent: str, tint: float) -> bool:
     """Atualiza o tema Starship Prompt (~/.config/starship.toml)."""
@@ -441,7 +712,7 @@ color_yellow = '{c_yellow}'"""
         # 3. Anexa os blocos de paleta de forma limpa e idempotente
         content = content.rstrip() + "\n\n" + palette_block + "\n"
 
-        STARSHIP_TOML.write_text(content, encoding="utf-8")
+        _write_text_if_changed(STARSHIP_TOML, content)
         return True
     except Exception as e:
         print(f"[!] Erro ao atualizar starship.toml: {e}")
@@ -484,8 +755,8 @@ Color14=#06b6d4
 Color15=#ffffff
 """
         # Grava tanto wallpapersync.palette quanto chromaleon.palette para compatibilidade
-        (PTYXIS_PALETTES_DIR / "wallpapersync.palette").write_text(palette_content, encoding="utf-8")
-        (PTYXIS_PALETTES_DIR / "chromaleon.palette").write_text(palette_content, encoding="utf-8")
+        _write_text_if_changed(PTYXIS_PALETTES_DIR / "wallpapersync.palette", palette_content)
+        _write_text_if_changed(PTYXIS_PALETTES_DIR / "chromaleon.palette", palette_content)
 
         # Fallback para instalações Flatpak do Ptyxis
         flatpak_dirs = [
@@ -496,8 +767,8 @@ Color15=#ffffff
         for fdir in flatpak_dirs:
             if fdir.parent.exists():
                 fdir.mkdir(parents=True, exist_ok=True)
-                (fdir / "wallpapersync.palette").write_text(palette_content, encoding="utf-8")
-                (fdir / "chromaleon.palette").write_text(palette_content, encoding="utf-8")
+                _write_text_if_changed(fdir / "wallpapersync.palette", palette_content)
+                _write_text_if_changed(fdir / "chromaleon.palette", palette_content)
 
         # Define no perfil padrão e em todos os perfis cadastrados no GSettings do Ptyxis
         try:
@@ -524,7 +795,8 @@ Color15=#ffffff
                         "org.gnome.Ptyxis.Profile",
                         f"/org/gnome/Ptyxis/Profiles/{u}/",
                     )
-                    profile.set_string("palette", target_palette_id)
+                    if profile.get_string("palette") != target_palette_id:
+                        profile.set_string("palette", target_palette_id)
                 except Exception:
                     pass
         except Exception:
@@ -696,7 +968,7 @@ def update_firefox_theme(accent: str, tint: float) -> bool:
     success = False
 
     try:
-        FIREFOX_THEME.write_text(css_content, encoding="utf-8")
+        _write_text_if_changed(FIREFOX_THEME, css_content)
     except Exception as e:
         print(f"[!] Erro ao salvar cópia local {FIREFOX_THEME}: {e}")
 
@@ -712,10 +984,10 @@ def update_firefox_theme(accent: str, tint: float) -> bool:
             else:
                 user_js.write_text(pref_line + "\n", encoding="utf-8")
 
-            # 2. Grava chrome/userChrome.css
+            # 2. Grava chrome/userChrome.css apenas se houver alteração
             chrome_dir = pdir / "chrome"
             chrome_dir.mkdir(parents=True, exist_ok=True)
-            (chrome_dir / "userChrome.css").write_text(css_content, encoding="utf-8")
+            _write_text_if_changed(chrome_dir / "userChrome.css", css_content)
             success = True
         except Exception as e:
             print(f"[!] Erro ao atualizar Firefox em {pdir}: {e}")
@@ -1177,14 +1449,44 @@ def update_theme(
     wallpaper_path: Path | str | None = None,
     custom_accent: str | None = None,
     custom_tint: float | None = None,
+    force: bool = False,
 ) -> bool:
-    """Executa a sincronização de todos os temas do ecossistema."""
+    """
+    Executa a sincronização de todos os temas do ecossistema de forma idempotente:
+    1. Aguarda o término de transações DNF/RPM em andamento.
+    2. Valida o estado atual (SHA-256 do wallpaper + `gsettings get`) contra
+       `$XDG_RUNTIME_DIR/wallpapersync.state` e ignora eventos redundantes.
+    3. Aplica apenas alterações necessárias e persiste o novo estado.
+    """
+    if not wait_for_package_transaction():
+        return False
+
+    is_desktop_sync = (
+        wallpaper_path is None
+        and custom_accent is None
+        and custom_tint is None
+    )
+    current_state = collect_current_state(wallpaper_path=wallpaper_path)
+
+    if is_desktop_sync and not force:
+        saved_state = load_saved_state()
+        if is_state_unchanged(current_state, saved_state):
+            sha_preview = (current_state.get("wallpaper_sha256") or "")[:12]
+            print(
+                f"[=] Estado inalterado (color-scheme={current_state.get('color_scheme')}, "
+                f"sha256={sha_preview}). Evento ignorado."
+            )
+            return False
+
     if custom_accent:
         accent = custom_accent.lower()
         tint = custom_tint if custom_tint is not None else 0.10
-        active_wp = Path(wallpaper_path) if wallpaper_path else None
+        active_wp = Path(wallpaper_path) if wallpaper_path else (
+            Path(current_state["wallpaper_path"]) if current_state.get("wallpaper_path") else None
+        )
     else:
-        accent, tint, active_wp = extract_wallpaper_colors(wallpaper_path, forced_tint=custom_tint)
+        effective_wp_arg = wallpaper_path or current_state.get("wallpaper_path")
+        accent, tint, active_wp = extract_wallpaper_colors(effective_wp_arg, forced_tint=custom_tint)
 
     if not accent:
         print("[!] Nenhuma cor válida pôde ser extraída.")
@@ -1196,7 +1498,7 @@ def update_theme(
     if MIDNIGHT_THEME.exists():
         midnight_css = generate_midnight_css(accent, tint)
         try:
-            MIDNIGHT_THEME.write_text(midnight_css, encoding="utf-8")
+            _write_text_if_changed(MIDNIGHT_THEME, midnight_css)
             updated_files.append(MIDNIGHT_THEME.name)
         except Exception as e:
             print(f"[!] Erro ao salvar {MIDNIGHT_THEME}: {e}")
@@ -1205,7 +1507,7 @@ def update_theme(
     if SYSTEM24_THEME.exists():
         system24_css = generate_system24_css(accent, tint)
         try:
-            SYSTEM24_THEME.write_text(system24_css, encoding="utf-8")
+            _write_text_if_changed(SYSTEM24_THEME, system24_css)
             updated_files.append(SYSTEM24_THEME.name)
         except Exception as e:
             print(f"[!] Erro ao salvar {SYSTEM24_THEME}: {e}")
@@ -1236,9 +1538,20 @@ def update_theme(
     if update_firefox_theme(accent, tint):
         updated_files.append("Navegador Firefox (userChrome.css)")
 
-    # 6. Sincroniza accent color nativa do GNOME 47+ se suportado
+    # 6. Sincroniza accent color nativa do GNOME 47+ se suportado e somente se diferir
     if sync_gnome_accent_color(accent):
         updated_files.append(f"GNOME Desktop Native Accent ({map_hex_to_gnome_accent(accent)})")
+
+    if is_desktop_sync:
+        state_payload = {
+            "wallpaper_sha256": current_state.get("wallpaper_sha256") or compute_file_sha256(active_wp),
+            "color_scheme": current_state.get("color_scheme"),
+            "accent_color": accent,
+            "picture_uri": current_state.get("picture_uri"),
+            "picture_uri_dark": current_state.get("picture_uri_dark"),
+            "wallpaper_path": str(active_wp) if active_wp else current_state.get("wallpaper_path"),
+        }
+        save_state(state_payload)
 
     if updated_files:
         print(f"[✓] Temas sincronizados com sucesso!")
@@ -1257,35 +1570,86 @@ def update_theme(
 # 5. MONITORAMENTO EM TEMPO REAL E GERENCIAMENTO DE EVENTOS
 # ==============================================================================
 
-last_resync_time = [0.0]
 resync_source_id = [None]
+_fallback_timer_lock = threading.Lock()
+_fallback_timer: list[threading.Timer | None] = [None]
 
 
-def trigger_wallpaper_resync(reason="retomada de suspensão", delay_seconds=1.5, wallpaper_path=None):
-    """Executa a sincronização debounced após eventos do sistema (wake up, boot, troca de wallpaper)."""
-    now = time.monotonic()
-    if now - last_resync_time[0] < 3.0:
-        return
+def cancel_pending_resync():
+    """Cancela qualquer timer de debounce pendente (GLib ou fallback threading.Timer)."""
+    if resync_source_id[0] is not None:
+        try:
+            import gi
+            gi.require_version("GLib", "2.0")
+            from gi.repository import GLib
+            GLib.source_remove(resync_source_id[0])
+        except Exception:
+            pass
+        resync_source_id[0] = None
+
+    with _fallback_timer_lock:
+        if _fallback_timer[0] is not None:
+            _fallback_timer[0].cancel()
+            _fallback_timer[0] = None
+
+
+def trigger_wallpaper_resync(
+    reason: str = "retomada de suspensão",
+    delay_seconds: float = DEBOUNCE_SECONDS,
+    wallpaper_path: Path | str | None = None,
+):
+    """
+    Executa a sincronização com debounce (padrão 2.0s) para consolidar rajadas
+    de sinais do `dbus-broker` / `dconf` / inotify antes de avaliar o estado.
+    """
+    delay = max(1.5, float(delay_seconds))
 
     try:
         import gi
         gi.require_version("GLib", "2.0")
         from gi.repository import GLib
 
-        if resync_source_id[0]:
+        if resync_source_id[0] is not None:
             GLib.source_remove(resync_source_id[0])
+            resync_source_id[0] = None
+
+        wait_ctx = {"logged": False, "deadline": None}
 
         def _do_resync():
+            if is_package_transaction_active():
+                if wait_ctx["deadline"] is None:
+                    wait_ctx["deadline"] = time.monotonic() + RPM_WAIT_TIMEOUT_SECONDS
+                if time.monotonic() >= wait_ctx["deadline"]:
+                    print("[!] Tempo limite atingido aguardando término da transação RPM/DNF.")
+                    resync_source_id[0] = None
+                    return GLib.SOURCE_REMOVE
+                if not wait_ctx["logged"]:
+                    print("[*] Transação RPM/DNF em andamento. Aguardando término antes de avaliar estado...")
+                    wait_ctx["logged"] = True
+                resync_source_id[0] = GLib.timeout_add(int(RPM_WAIT_POLL_SECONDS * 1000), _do_resync)
+                return GLib.SOURCE_REMOVE
+
             resync_source_id[0] = None
-            last_resync_time[0] = time.monotonic()
-            print(f"\n[*] [{reason}] Sincronizando com o papel de parede...")
+            print(f"\n[*] [{reason}] Avaliando estado do papel de parede...")
             update_theme(wallpaper_path=wallpaper_path)
             return GLib.SOURCE_REMOVE
 
-        resync_source_id[0] = GLib.timeout_add(int(delay_seconds * 1000), _do_resync)
-    except Exception as e:
-        print(f"[!] Erro ao agendar resync: {e}")
-        update_theme(wallpaper_path=wallpaper_path)
+        resync_source_id[0] = GLib.timeout_add(int(delay * 1000), _do_resync)
+    except Exception:
+        with _fallback_timer_lock:
+            if _fallback_timer[0] is not None:
+                _fallback_timer[0].cancel()
+
+            def _do_fallback_resync():
+                with _fallback_timer_lock:
+                    _fallback_timer[0] = None
+                print(f"\n[*] [{reason}] Avaliando estado do papel de parede...")
+                update_theme(wallpaper_path=wallpaper_path)
+
+            timer = threading.Timer(delay, _do_fallback_resync)
+            timer.daemon = True
+            _fallback_timer[0] = timer
+            timer.start()
 
 
 def watch_mode():
@@ -1313,6 +1677,13 @@ def watch_mode():
         if current_monitors["path"] == wp_path:
             return
 
+        if current_monitors["file"] is not None:
+            try:
+                current_monitors["file"].cancel()
+            except Exception:
+                pass
+            current_monitors["file"] = None
+
         current_monitors["path"] = wp_path
         try:
             gfile = Gio.File.new_for_path(str(wp_path))
@@ -1320,7 +1691,10 @@ def watch_mode():
 
             def on_file_changed(mon, f, of, ev):
                 if ev in (Gio.FileMonitorEvent.CHANGED, Gio.FileMonitorEvent.CHANGES_DONE_HINT):
-                    trigger_wallpaper_resync(reason="Arquivo do Wallpaper modificado", delay_seconds=0.3)
+                    trigger_wallpaper_resync(
+                        reason="Arquivo do Wallpaper modificado",
+                        delay_seconds=DEBOUNCE_SECONDS,
+                    )
 
             f_mon.connect("changed", on_file_changed)
             current_monitors["file"] = f_mon
@@ -1339,7 +1713,10 @@ def watch_mode():
         def on_bg_changed(settings, key):
             new_wp = get_current_wallpaper_path()
             setup_wallpaper_file_monitor(new_wp)
-            trigger_wallpaper_resync(reason=f"Troca de Wallpaper detectada ({key})", delay_seconds=0.2)
+            trigger_wallpaper_resync(
+                reason=f"Troca de Wallpaper detectada ({key})",
+                delay_seconds=DEBOUNCE_SECONDS,
+            )
 
         bg_settings.connect("changed::picture-uri", on_bg_changed)
         bg_settings.connect("changed::picture-uri-dark", on_bg_changed)
@@ -1357,7 +1734,10 @@ def watch_mode():
                     going_to_sleep = params.get_child_value(0).get_boolean()
                     if not going_to_sleep:
                         print("\n[*] [D-Bus] Retorno de suspensão detectado!")
-                        trigger_wallpaper_resync(reason="Retorno de Suspensão", delay_seconds=1.5)
+                        trigger_wallpaper_resync(
+                            reason="Retorno de Suspensão",
+                            delay_seconds=DEBOUNCE_SECONDS,
+                        )
                 except Exception as e:
                     print(f"[!] Erro ao processar PrepareForSleep: {e}")
 
@@ -1384,7 +1764,10 @@ def watch_mode():
                     is_active = params.get_child_value(0).get_boolean()
                     if not is_active:
                         print("\n[*] [D-Bus] Desbloqueio de tela detectado!")
-                        trigger_wallpaper_resync(reason="Desbloqueio de Tela", delay_seconds=1.0)
+                        trigger_wallpaper_resync(
+                            reason="Desbloqueio de Tela",
+                            delay_seconds=DEBOUNCE_SECONDS,
+                        )
                 except Exception as e:
                     print(f"[!] Erro ao processar ScreenSaver: {e}")
 
@@ -1412,7 +1795,10 @@ def watch_mode():
         last_tick_time[0] = now
         if elapsed > 5.0:
             print(f"\n[*] [Timer] Retorno de suspensão detectado por desvio temporal ({elapsed:.1f}s decorridos)!")
-            trigger_wallpaper_resync(reason="Retorno de Suspensão (Salto Temporal)", delay_seconds=1.0)
+            trigger_wallpaper_resync(
+                reason="Retorno de Suspensão (Salto Temporal)",
+                delay_seconds=DEBOUNCE_SECONDS,
+            )
         return GLib.SOURCE_CONTINUE
 
     GLib.timeout_add_seconds(1, check_time_jump)
@@ -1473,6 +1859,8 @@ def install_user_service():
     service_content = f"""[Unit]
 Description=WallpaperSync Theme Synchronizer (Discord, Terminal, Firefox)
 After=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -1536,6 +1924,12 @@ def uninstall_all():
     # 1. Serviços systemd
     print("\n[1/5] Parando e desabilitando serviços systemd...")
     uninstall_user_service()
+
+    # Remove o arquivo de cache de estado em $XDG_RUNTIME_DIR
+    try:
+        get_state_file_path().unlink(missing_ok=True)
+    except Exception:
+        pass
 
     # 2. Discord / Equibop
     print("\n[2/5] Removendo temas do Discord / Equibop...")
@@ -1641,6 +2035,9 @@ def main():
         "--tint", "-t", type=float, default=None, help="Sobrescreve a intensidade de tint (ex: 0.10)."
     )
     parser.add_argument(
+        "--force", "-f", action="store_true", help="Força a reaplicação dos temas mesmo que o estado em cache seja idêntico."
+    )
+    parser.add_argument(
         "--install-service", action="store_true", help="Instala e configura o serviço systemd do usuário."
     )
     parser.add_argument(
@@ -1680,6 +2077,7 @@ def main():
             wallpaper_path=args.image,
             custom_accent=args.accent,
             custom_tint=args.tint,
+            force=args.force,
         )
         print("\nDica: Para monitorar automaticamente sempre que o wallpaper mudar, execute:")
         print(f"  python3 {SCRIPT_DIR / 'sync_theme.py'} --watch")
@@ -1691,3 +2089,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,0 +1,15 @@
+[Unit]
+Description=WallpaperSync Theme Synchronizer (Discord, Terminal, Firefox)
+After=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u %h/Imagens/Wallpapers/WallpaperSync/sync_theme.py --watch
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
