@@ -28,6 +28,14 @@ import subprocess
 import urllib.parse
 from pathlib import Path
 
+from m3_palette import build_m3_scheme
+from m3_icons import (
+    VALID_ICON_MODES,
+    render_html_preview,
+    sync_m3_icon_pack,
+    uninstall_m3_icon_pack,
+)
+
 # Diretórios e caminhos padrão do projeto
 SCRIPT_DIR = Path(__file__).resolve().parent
 SYSTEM24_THEME = SCRIPT_DIR / "system24.theme.css"
@@ -35,6 +43,12 @@ MIDNIGHT_THEME = SCRIPT_DIR / "midnight.theme.css"
 FIREFOX_THEME = SCRIPT_DIR / "firefox-userChrome.css"
 STARSHIP_TOML = Path.home() / ".config" / "starship.toml"
 PTYXIS_PALETTES_DIR = Path.home() / ".local" / "share" / "org.gnome.Ptyxis" / "palettes"
+
+
+def get_default_icon_mode() -> str:
+    """Retorna o modo padrão de geração do pacote de ícones M3."""
+    env_mode = os.environ.get("WALLPAPERSYNC_ICON_MODE", "system").strip().lower()
+    return env_mode if env_mode in VALID_ICON_MODES else "system"
 
 # Configurações de estabilidade, debounce e bloqueio de transações RPM/DNF
 DEBOUNCE_SECONDS = 2.0
@@ -364,10 +378,14 @@ def save_state(state: dict, state_file: Path | None = None) -> bool:
         return False
 
 
-def is_state_unchanged(current_state: dict, saved_state: dict | None) -> bool:
+def is_state_unchanged(
+    current_state: dict,
+    saved_state: dict | None,
+    icon_mode: str | None = None,
+) -> bool:
     """
     Compara o estado atual do sistema com o estado persistido em `.state`.
-    Retorna True somente se o wallpaper (SHA-256), color-scheme e URIs forem idênticos.
+    Retorna True somente se o wallpaper (SHA-256), color-scheme, URIs e modo de ícones forem idênticos.
     """
     if not saved_state:
         return False
@@ -382,6 +400,8 @@ def is_state_unchanged(current_state: dict, saved_state: dict | None) -> bool:
     if "picture_uri" in saved_state and saved_state.get("picture_uri") != current_state.get("picture_uri"):
         return False
     if "picture_uri_dark" in saved_state and saved_state.get("picture_uri_dark") != current_state.get("picture_uri_dark"):
+        return False
+    if icon_mode is not None and saved_state.get("icon_mode") != icon_mode:
         return False
     return True
 
@@ -1450,6 +1470,7 @@ def update_theme(
     custom_accent: str | None = None,
     custom_tint: float | None = None,
     force: bool = False,
+    icon_mode: str | None = None,
 ) -> bool:
     """
     Executa a sincronização de todos os temas do ecossistema de forma idempotente:
@@ -1461,6 +1482,8 @@ def update_theme(
     if not wait_for_package_transaction():
         return False
 
+    effective_icon_mode = icon_mode if icon_mode in VALID_ICON_MODES else get_default_icon_mode()
+
     is_desktop_sync = (
         wallpaper_path is None
         and custom_accent is None
@@ -1470,7 +1493,7 @@ def update_theme(
 
     if is_desktop_sync and not force:
         saved_state = load_saved_state()
-        if is_state_unchanged(current_state, saved_state):
+        if is_state_unchanged(current_state, saved_state, icon_mode=effective_icon_mode):
             sha_preview = (current_state.get("wallpaper_sha256") or "")[:12]
             print(
                 f"[=] Estado inalterado (color-scheme={current_state.get('color_scheme')}, "
@@ -1542,11 +1565,26 @@ def update_theme(
     if sync_gnome_accent_color(accent):
         updated_files.append(f"GNOME Desktop Native Accent ({map_hex_to_gnome_accent(accent)})")
 
+    # 7. Gera e aplica o pacote de ícones dinâmico Material Design 3
+    is_dark = "dark" in (current_state.get("color_scheme") or "prefer-dark").lower()
+    icons_updated, m3_scheme, active_icon_slot = sync_m3_icon_pack(
+        accent_hex=accent,
+        is_dark=is_dark,
+        mode=effective_icon_mode,
+        gsettings_get_fn=gsettings_get,
+        gsettings_set_fn=gsettings_set,
+    )
+    if icons_updated and active_icon_slot:
+        updated_files.append(f"Material 3 Icon Pack ({active_icon_slot}, modo={effective_icon_mode})")
+
     if is_desktop_sync:
         state_payload = {
             "wallpaper_sha256": current_state.get("wallpaper_sha256") or compute_file_sha256(active_wp),
             "color_scheme": current_state.get("color_scheme"),
             "accent_color": accent,
+            "icon_mode": effective_icon_mode,
+            "icon_theme": active_icon_slot,
+            "m3_primary": m3_scheme.get("primary"),
             "picture_uri": current_state.get("picture_uri"),
             "picture_uri_dark": current_state.get("picture_uri_dark"),
             "wallpaper_path": str(active_wp) if active_wp else current_state.get("wallpaper_path"),
@@ -1557,7 +1595,7 @@ def update_theme(
         print(f"[✓] Temas sincronizados com sucesso!")
         if active_wp:
             print(f"    - Wallpaper:       {active_wp}")
-        print(f"    - Cor de Destaque: {accent}")
+        print(f"    - Cor de Destaque: {accent} (M3 Primary: {m3_scheme.get('primary')})")
         print(f"    - Tint Intensity:  {tint * 100:.1f}%")
         for fname in updated_files:
             print(f"    - Atualizado:      {fname}")
@@ -1916,13 +1954,14 @@ def uninstall_all():
     3. Remove as paletas geradas do Ptyxis e restaura o perfil para 'gnome'.
     4. Remove as seções de paleta do starship.toml.
     5. Remove o userChrome.css dinâmico dos perfis do Firefox.
+    6. Remove os slots de ícones Material Design 3 e restaura o tema de ícones anterior.
     """
     print("==================================================")
     print("      WallpaperSync — Desinstalação Completa      ")
     print("==================================================")
 
     # 1. Serviços systemd
-    print("\n[1/5] Parando e desabilitando serviços systemd...")
+    print("\n[1/6] Parando e desabilitando serviços systemd...")
     uninstall_user_service()
 
     # Remove o arquivo de cache de estado em $XDG_RUNTIME_DIR
@@ -1932,7 +1971,7 @@ def uninstall_all():
         pass
 
     # 2. Discord / Equibop
-    print("\n[2/5] Removendo temas do Discord / Equibop...")
+    print("\n[2/6] Removendo temas do Discord / Equibop...")
     for ddir in get_discord_theme_dirs():
         for fname in ["system24.theme.css", "midnight.theme.css"]:
             tpath = ddir / fname
@@ -1944,7 +1983,7 @@ def uninstall_all():
                     print(f"  [!] Erro ao remover {tpath}: {e}")
 
     # 3. Ptyxis Terminal
-    print("\n[3/5] Restaurando paletas do terminal Ptyxis...")
+    print("\n[3/6] Restaurando paletas do terminal Ptyxis...")
     palette_files = [
         PTYXIS_PALETTES_DIR / "wallpapersync.palette",
         PTYXIS_PALETTES_DIR / "chromaleon.palette",
@@ -1987,7 +2026,7 @@ def uninstall_all():
         pass
 
     # 4. Starship Prompt
-    print("\n[4/5] Restaurando ~/.config/starship.toml...")
+    print("\n[4/6] Restaurando ~/.config/starship.toml...")
     if STARSHIP_TOML.exists():
         try:
             txt = STARSHIP_TOML.read_text(encoding="utf-8")
@@ -1999,7 +2038,7 @@ def uninstall_all():
             print(f"  [!] Erro ao limpar starship.toml: {e}")
 
     # 5. Firefox
-    print("\n[5/5] Restaurando temas do Firefox...")
+    print("\n[5/6] Restaurando temas do Firefox...")
     for pdir in get_firefox_profile_dirs():
         chrome_file = pdir / "chrome" / "userChrome.css"
         if chrome_file.exists():
@@ -2011,6 +2050,12 @@ def uninstall_all():
             except Exception as e:
                 print(f"  [!] Erro ao remover userChrome.css em {pdir}: {e}")
 
+    # 6. Pacote de ícones Material Design 3
+    print("\n[6/6] Removendo pacote de ícones Material Design 3...")
+    removed_icons = uninstall_m3_icon_pack(gsettings_get_fn=gsettings_get, gsettings_set_fn=gsettings_set)
+    for rpath in removed_icons:
+        print(f"  [✓] Removido: {rpath}")
+
     print("\n[✓] Desinstalação concluída com sucesso! Os aplicativos foram restaurados aos seus padrões.")
 
 
@@ -2020,7 +2065,7 @@ def uninstall_all():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="WallpaperSync — Sincroniza temas a partir do papel de parede do desktop.",
+        description="WallpaperSync — Sincroniza temas e ícones Material Design 3 a partir do papel de parede.",
     )
     parser.add_argument(
         "--watch", "-w", action="store_true", help="Monitora alterações no papel de parede em tempo real."
@@ -2038,6 +2083,24 @@ def main():
         "--force", "-f", action="store_true", help="Força a reaplicação dos temas mesmo que o estado em cache seja idêntico."
     )
     parser.add_argument(
+        "--icon-mode",
+        choices=VALID_ICON_MODES,
+        default=None,
+        help="Modo do pacote de ícones M3: system (padrão), full, places ou off.",
+    )
+    parser.add_argument(
+        "--no-icons",
+        action="store_true",
+        help="Desativa a geração do pacote de ícones Material Design 3 (atalho para --icon-mode off).",
+    )
+    parser.add_argument(
+        "--preview-icons",
+        nargs="?",
+        const=str(SCRIPT_DIR / "icons-preview.html"),
+        default=None,
+        help="Gera uma página HTML de pré-visualização da paleta e dos ícones Material Design 3.",
+    )
+    parser.add_argument(
         "--install-service", action="store_true", help="Instala e configura o serviço systemd do usuário."
     )
     parser.add_argument(
@@ -2047,7 +2110,7 @@ def main():
         "--uninstall", action="store_true", help="Desinstalação completa: remove serviços, temas gerados, paletas e restaura aplicativos."
     )
     parser.add_argument(
-        "--info", action="store_true", help="Exibe informações do papel de parede e cores detectadas."
+        "--info", action="store_true", help="Exibe informações do papel de parede, paleta M3 e cores detectadas."
     )
     parser.add_argument(
         "--reload-chromaleon", action="store_true", help=argparse.SUPPRESS,  # Mantido para retrocompatibilidade
@@ -2055,21 +2118,51 @@ def main():
 
     args = parser.parse_args()
 
+    resolved_icon_mode = "off" if args.no_icons else args.icon_mode
+    if resolved_icon_mode:
+        os.environ["WALLPAPERSYNC_ICON_MODE"] = resolved_icon_mode
+
     if args.uninstall:
         uninstall_all()
     elif args.uninstall_service:
         uninstall_user_service()
     elif args.install_service:
         install_user_service()
+    elif args.preview_icons:
+        wp = Path(args.image) if args.image else get_current_wallpaper_path()
+        if args.accent:
+            accent = args.accent.lower()
+        else:
+            accent, _, _ = extract_wallpaper_colors(wp, forced_tint=args.tint)
+        color_scheme = gsettings_get("org.gnome.desktop.interface", "color-scheme")
+        is_dark = "dark" in (color_scheme or "prefer-dark").lower()
+        scheme = build_m3_scheme(accent, is_dark=is_dark)
+        mode = resolved_icon_mode or get_default_icon_mode()
+        out_path = Path(args.preview_icons)
+        out_path.write_text(render_html_preview(scheme, mode=mode), encoding="utf-8")
+        print(f"[✓] Pré-visualização Material Design 3 salva em: {out_path}")
     elif args.info:
         wp = Path(args.image) if args.image else get_current_wallpaper_path()
-        accent, tint, active_wp = extract_wallpaper_colors(wp, forced_tint=args.tint)
+        if args.accent:
+            accent = args.accent.lower()
+            tint = args.tint if args.tint is not None else 0.10
+            active_wp = wp
+        else:
+            accent, tint, active_wp = extract_wallpaper_colors(wp, forced_tint=args.tint)
         gnome_acc = map_hex_to_gnome_accent(accent)
+        color_scheme = gsettings_get("org.gnome.desktop.interface", "color-scheme")
+        is_dark = "dark" in (color_scheme or "prefer-dark").lower()
+        scheme = build_m3_scheme(accent, is_dark=is_dark)
         print("=== Informações do WallpaperSync ===")
         print(f"Wallpaper detectado: {active_wp}")
         print(f"Cor de destaque:     {accent}")
         print(f"Accent GNOME 47+:    {gnome_acc}")
         print(f"Intensidade de tint: {tint * 100:.1f}%")
+        print(f"Modo de ícones M3:   {resolved_icon_mode or get_default_icon_mode()} ({scheme['mode']})")
+        print(f"M3 Primary:          {scheme['primary']} (OnPrimary: {scheme['onPrimary']})")
+        print(f"M3 PrimaryContainer: {scheme['primaryContainer']} (OnContainer: {scheme['onPrimaryContainer']})")
+        print(f"M3 Secondary:        {scheme['secondary']} | Tertiary: {scheme['tertiary']}")
+        print(f"M3 Folder Tones:     back={scheme['iconFolderBack']}, front={scheme['iconFolderFrontBottom']}, glyph={scheme['iconFolderGlyph']}")
     elif args.watch:
         watch_mode()
     else:
@@ -2078,6 +2171,7 @@ def main():
             custom_accent=args.accent,
             custom_tint=args.tint,
             force=args.force,
+            icon_mode=resolved_icon_mode,
         )
         print("\nDica: Para monitorar automaticamente sempre que o wallpaper mudar, execute:")
         print(f"  python3 {SCRIPT_DIR / 'sync_theme.py'} --watch")
@@ -2089,4 +2183,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

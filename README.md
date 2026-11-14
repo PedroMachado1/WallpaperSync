@@ -12,10 +12,11 @@ O **WallpaperSync** é uma suíte de automação desenvolvida para extrair a pal
 - **Prompt do Terminal** (`starship.toml`);
 - **Emulador de Terminal GNOME** (`Ptyxis`);
 - **Navegador Web Firefox** (estilização dinâmica de abas horizontais e verticais, barra de URL e navegação via `userChrome.css`);
-- **Ambiente GNOME Desktop** (sincronização automática da chave nativa `accent-color` no GNOME 47+).
+- **Ambiente GNOME Desktop** (sincronização automática da chave nativa `accent-color` no GNOME 47+);
+- **Pacote de Ícones Material Design 3** (geração dinâmica de SVGs para pastas, locais, mimetypes e aplicativos adaptativos com hot-reload em `~/.local/share/icons/WallpaperSync-M3-{A,B}`).
 
 > [!NOTE]
-> **Independência de Extensões**: O projeto não depende mais da extensão ChromaLeon nem de arquivos intermediários GTK (`custom-accent.css`). Toda a extração e cálculo de cores é realizada nativamente em Python via análise de imagem (Pillow) e quantização adaptativa tonal.
+> **Independência de Extensões**: O projeto não depende mais da extensão ChromaLeon nem de arquivos intermediários GTK (`custom-accent.css`). Toda a extração e cálculo de cores é realizada nativamente em Python via análise de imagem (Pillow), quantização adaptativa tonal e motor HCT do Material Design 3 (`m3_palette.py`).
 
 ---
 
@@ -34,8 +35,8 @@ flowchart TD
 
     subgraph Extração de Cores Material You
         D --> E1[Pillow / Quantização Adaptativa MedianCut]
-        E1 --> E2[Fórmula M3: Saturação, Luminosidade e População]
-        E2 --> E3[Cores de Destaque e Superfícies Tinted]
+        E1 --> E2[Fórmula M3 + Motor HCT m3_palette.py]
+        E2 --> E3[Cores de Destaque, Tokens M3 e Superfícies Tinted]
     end
 
     E3 -->|1. midnight.theme.css| F1[Equibop / Discord]
@@ -44,6 +45,7 @@ flowchart TD
     E3 -->|4. wallpapersync.palette| F3[Ptyxis Terminal]
     E3 -->|5. userChrome.css| F4[Navegador Firefox]
     E3 -->|6. accent-color| F5[GNOME 47+ Native Accent]
+    E3 -->|7. m3_icons.py| F6[Pacote de Ícones M3 A/B]
 ```
 
 ---
@@ -115,6 +117,23 @@ Os temas em `/home/pedro/Imagens/Wallpapers/WallpaperSync/` estão linkados para
 
 ---
 
+### 3.5. Pacote de Ícones Dinâmico Material Design 3 (`m3_palette.py` & `m3_icons.py`)
+
+1. **Motor de Cores HCT (`m3_palette.py`)**:
+   - Implementação em Python puro do modelo CAM16 / HCT do Material Design 3 (`SchemeTonalSpot`), derivando paletas tonais (`primary`, `secondary`, `tertiary`, `error`, `surfaceContainer*`, `outlineVariant`) para modos **Dark** e **Light** com contraste WCAG verificado.
+2. **Geração de SVGs Freedesktop (`m3_icons.py`)**:
+   - Gera ícones vetoriais em `~/.local/share/icons/WallpaperSync-M3-{A,B}/scalable/` para pastas (`places/`), tipos de arquivo (`mimetypes/`) e aplicativos adaptativos em squircle Material You (`apps/`).
+   - Monta automaticamente a cadeia `Inherits=` no `index.theme` priorizando temas instalados no sistema (`MoreWaita`, `Papirus-Dark`/`Papirus`, `Adwaita`, `hicolor`).
+3. **Modos de Ícones (`--icon-mode` ou `WALLPAPERSYNC_ICON_MODE`)**:
+   - `system` *(padrão)*: pastas + locais + mimetypes + ícones de apps integrados do GNOME (Nautilus, Ptyxis, Settings, TextEditor, Calculator, SystemMonitor, Software).
+   - `full`: inclui também ícones temáticos M3 para apps populares (Firefox, Equibop/Discord, VS Code, Spotify, VLC).
+   - `places`: apenas pastas, locais e mimetypes.
+   - `off`: desativa a geração de ícones.
+4. **Hot-Reload Atômico no GNOME**:
+   - Alterna automaticamente entre dois slots (`WallpaperSync-M3-A` ↔ `WallpaperSync-M3-B`) via `gsettings`, forçando o Nautilus e o GNOME Shell a recarregarem os SVGs instantaneamente sem reiniciar a sessão. O tema original do usuário é salvo para restauração no `--uninstall`.
+
+---
+
 ## 4. Automação e Ciclo de Vida (systemd & D-Bus)
 
 ### 4.1. Serviço do Usuário
@@ -139,9 +158,12 @@ O serviço roda sob a sessão do systemd do usuário:
 | Arquivo / Caminho | Origem / Destino | Função |
 |---|---|---|
 | `/home/pedro/Imagens/Wallpapers/WallpaperSync/sync_theme.py` | Código-fonte principal | Daemon de monitoramento, conversão de cores e controle D-Bus |
+| `/home/pedro/Imagens/Wallpapers/WallpaperSync/m3_palette.py` | Módulo M3 | Motor de cores CAM16 / HCT e tokens tonais Material Design 3 |
+| `/home/pedro/Imagens/Wallpapers/WallpaperSync/m3_icons.py` | Módulo M3 Icons | Gerador de SVGs Freedesktop e hot-reloader de slots no GNOME |
 | `/home/pedro/Imagens/Wallpapers/WallpaperSync/midnight.theme.css` | Gerado por `sync_theme.py` | Tema Discord Midnight sincronizado |
 | `/home/pedro/Imagens/Wallpapers/WallpaperSync/system24.theme.css` | Gerado por `sync_theme.py` | Tema Discord System24 (Material You M3) sincronizado |
 | `/home/pedro/Imagens/Wallpapers/WallpaperSync/firefox-userChrome.css` | Gerado por `sync_theme.py` | Cópia local de referência do tema do Firefox |
+| `~/.local/share/icons/WallpaperSync-M3-{A,B}/` | Gerado por `m3_icons.py` | Slots alternados do pacote de ícones dinâmico Material Design 3 |
 | `~/.config/systemd/user/wallpapersync.service` | Serviço systemd | Autostart do monitoramento no login do usuário |
 | `~/.var/app/org.equicord.equibop/config/equibop/themes/` | Links simbólicos | Diretório onde o Equibop carrega os temas |
 | `~/.config/starship.toml` | Arquivo do sistema | Configuração do prompt do shell |
@@ -160,7 +182,17 @@ O serviço roda sob a sessão do systemd do usuário:
   python3 sync_theme.py
   ```
 
-- **Ver informações do papel de parede detectado e cores calculadas**:
+- **Escolher o modo do pacote de ícones Material Design 3 (`system`, `full`, `places`, `off`)**:
+  ```bash
+  python3 sync_theme.py --icon-mode full --force
+  ```
+
+- **Gerar pré-visualização HTML interativa da paleta e dos ícones M3**:
+  ```bash
+  python3 sync_theme.py --preview-icons
+  ```
+
+- **Ver informações do papel de parede detectado, paleta M3 e cores calculadas**:
   ```bash
   python3 sync_theme.py --info
   ```
