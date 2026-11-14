@@ -3,12 +3,12 @@
 WallpaperSync — Sincronizador Dinâmico de Temas a partir do Papel de Parede
 Extrai a paleta de cores dominante e o tom de realce (accent color) diretamente
 do wallpaper ativo no sistema operacional (GNOME Desktop / GSettings ou arquivo local)
-e sincroniza os temas dos seguintes aplicativos:
- - Discord / Equibop (midnight.theme.css e system24.theme.css em Material Design 3)
+e sincroniza os temas dos seguintes componentes:
  - Prompt do Terminal (starship.toml)
  - Emulador de Terminal GNOME (Ptyxis)
  - Navegador Web Firefox (userChrome.css e user.js)
  - Destaque nativo do GNOME (accent-color no GNOME 47+)
+ - Pacote de Ícones Dinâmico Material Design 3 (Pastas, Mimetypes e Apps)
 """
 
 import os
@@ -38,8 +38,6 @@ from m3_icons import (
 
 # Diretórios e caminhos padrão do projeto
 SCRIPT_DIR = Path(__file__).resolve().parent
-SYSTEM24_THEME = SCRIPT_DIR / "system24.theme.css"
-MIDNIGHT_THEME = SCRIPT_DIR / "midnight.theme.css"
 FIREFOX_THEME = SCRIPT_DIR / "firefox-userChrome.css"
 STARSHIP_TOML = Path.home() / ".config" / "starship.toml"
 PTYXIS_PALETTES_DIR = Path.home() / ".local" / "share" / "org.gnome.Ptyxis" / "palettes"
@@ -1015,456 +1013,6 @@ def update_firefox_theme(accent: str, tint: float) -> bool:
     return success
 
 
-def generate_midnight_css(accent: str, tint: float) -> str:
-    """Gera o tema Discord Midnight sincronizado com o wallpaper."""
-    r, g, b = hex_to_rgb(accent)
-
-    bg_4 = mix("#0f1013", accent, tint)
-    bg_3 = mix("#0b0c0f", accent, tint)
-    bg_2 = mix("#191b22", accent, min(tint * 1.25, 0.25))
-    bg_1 = mix("#252834", accent, min(tint * 1.5, 0.30))
-
-    accent_1 = accent
-    accent_2 = adjust_lightness(accent, 0.12)
-    accent_3 = accent
-    accent_4 = adjust_lightness(accent, -0.08)
-    accent_5 = adjust_lightness(accent, -0.16)
-    accent_new = adjust_lightness(accent, 0.16)
-
-    hover_rgba = f"rgba({r}, {g}, {b}, 0.10)"
-    active_rgba = f"rgba({r}, {g}, {b}, 0.20)"
-    active_2_rgba = f"rgba({r}, {g}, {b}, 0.30)"
-    border_light_rgba = f"rgba({r}, {g}, {b}, 0.10)"
-    border_rgba = f"rgba({r}, {g}, {b}, 0.18)"
-
-    return f"""/**
- * @name midnight (WallpaperSync Dynamic)
- * @description a dark, customizable discord theme synchronized directly with desktop wallpaper.
- * @author refact0r (Sincronizado por WallpaperSync)
- * @version 2.1.1
- * @invite nz87hXyvcy
- * @website https://github.com/refact0r/midnight-discord
- * @source https://github.com/refact0r/midnight-discord/blob/master/themes/midnight.theme.css
- * @authorId 508863359777505290
- * @authorLink https://www.refact0r.dev
-*/
-
-/* import theme modules */
-@import url('https://refact0r.github.io/midnight-discord/build/midnight.css');
-
-body {{
-    /* font options */
-    --font: 'figtree';
-    --code-font: '';
-    font-weight: 400;
-
-    /* sizes */
-    --gap: 12px;
-    --divider-thickness: 4px;
-    --border-thickness: 1px;
-
-    /* animation/transition options */
-    --animations: on;
-    --list-item-transition: 0.2s ease;
-    --dms-icon-svg-transition: 0.4s ease;
-    --border-hover-transition: 0.2s ease;
-
-    /* top bar options */
-    --top-bar-height: var(--gap);
-    --top-bar-button-position: titlebar;
-    --top-bar-title-position: off;
-    --subtle-top-bar-title: off;
-
-    /* window controls */
-    --custom-window-controls: on;
-    --window-control-size: 14px;
-
-    /* dms button options */
-    --custom-dms-icon: custom;
-    --dms-icon-svg-url: url('https://refact0r.github.io/midnight-discord/assets/Font_Awesome_5_solid_moon.svg');
-    --dms-icon-svg-size: 90%;
-    --dms-icon-color-before: var(--icon-subtle);
-    --dms-icon-color-after: var(--white);
-    --custom-dms-background: off;
-    --dms-background-image-url: url('');
-    --dms-background-image-size: cover;
-    --dms-background-color: linear-gradient(70deg, var(--accent-1), var(--accent-2), var(--accent-4));
-
-    /* background image options */
-    --background-image: off;
-    --background-image-url: url('');
-
-    /* transparency/blur options */
-    --transparency-tweaks: off;
-    --remove-bg-layer: off;
-    --panel-blur: off;
-    --blur-amount: 12px;
-    --bg-floating: var(--bg-3);
-
-    /* chatbar options */
-    --custom-chatbar: separated;
-    --chatbar-height: 47px;
-
-    /* other options */
-    --small-user-panel: on;
-}}
-
-/* color options */
-:root {{
-    --colors: on;
-
-    /* text colors */
-    --text-0: var(--bg-4);
-    --text-1: #f4f6fa;
-    --text-2: #c6cddb;
-    --text-3: #9ea8ba;
-    --text-4: #6b768a;
-    --text-5: #475061;
-
-    /* background and dark colors (Tinted Dark) */
-    --bg-1: {bg_1};
-    --bg-2: {bg_2};
-    --bg-3: {bg_3};
-    --bg-4: {bg_4};
-    --hover: {hover_rgba};
-    --active: {active_rgba};
-    --active-2: {active_2_rgba};
-    --message-hover: rgba(0, 0, 0, 0.15);
-
-    /* accent colors (Wallpaper Dynamic) */
-    --accent-1: {accent_1};
-    --accent-2: {accent_2};
-    --accent-3: {accent_3};
-    --accent-4: {accent_4};
-    --accent-5: {accent_5};
-    --accent-new: {accent_new};
-    --mention: linear-gradient(to right, color-mix(in hsl, var(--accent-2), transparent 90%) 40%, transparent);
-    --mention-hover: linear-gradient(to right, color-mix(in hsl, var(--accent-2), transparent 95%) 40%, transparent);
-    --reply: linear-gradient(to right, color-mix(in hsl, var(--text-3), transparent 90%) 40%, transparent);
-    --reply-hover: linear-gradient(to right, color-mix(in hsl, var(--text-3), transparent 95%) 40%, transparent);
-
-    /* status indicator colors */
-    --online: #3dd68c;
-    --dnd: #ff5449;
-    --idle: #ffba28;
-    --streaming: #a855f7;
-    --offline: #6b768a;
-
-    /* border colors */
-    --border-light: {border_light_rgba};
-    --border: {border_rgba};
-    --border-hover: var(--accent-2);
-    --button-border: rgba(255, 255, 255, 0.08);
-
-    /* base colors */
-    --red-1: oklch(75% 0.12 0);
-    --red-2: oklch(70% 0.12 0);
-    --red-3: oklch(65% 0.12 0);
-    --red-4: oklch(60% 0.12 0);
-    --red-5: oklch(55% 0.12 0);
-
-    --green-1: oklch(75% 0.11 170);
-    --green-2: oklch(70% 0.11 170);
-    --green-3: oklch(65% 0.11 170);
-    --green-4: oklch(60% 0.11 170);
-    --green-5: oklch(55% 0.11 160);
-
-    --blue-1: oklch(75% 0.1 215);
-    --blue-2: oklch(70% 0.1 215);
-    --blue-3: oklch(65% 0.1 215);
-    --blue-4: oklch(60% 0.1 215);
-    --blue-5: oklch(55% 0.1 215);
-
-    --yellow-1: oklch(80% 0.11 90);
-    --yellow-2: oklch(75% 0.11 90);
-    --yellow-3: oklch(70% 0.11 90);
-    --yellow-4: oklch(65% 0.11 90);
-    --yellow-5: oklch(60% 0.11 90);
-
-    --purple-1: oklch(75% 0.11 310);
-    --purple-2: oklch(70% 0.11 310);
-    --purple-3: oklch(65% 0.11 310);
-    --purple-4: oklch(60% 0.11 310);
-    --purple-5: oklch(55% 0.11 310);
-}}
-"""
-
-
-def generate_system24_css(accent: str, tint: float) -> str:
-    """Gera o tema Discord System24 (Material Design 3 / Material You) sincronizado com o wallpaper."""
-    r, g, b = hex_to_rgb(accent)
-
-    bg_4 = mix("#111113", accent, tint)
-    bg_3 = mix("#0e0e10", accent, tint)
-    bg_2 = mix("#222226", accent, min(tint * 1.25, 0.25))
-    bg_1 = mix("#323238", accent, min(tint * 1.5, 0.30))
-
-    accent_1 = accent
-    accent_2 = adjust_lightness(accent, 0.14)
-    accent_3 = accent
-    accent_4 = adjust_lightness(accent, -0.10)
-    accent_new = adjust_lightness(accent, 0.20)
-
-    accent_rgb = f"{r}, {g}, {b}"
-    primary_container = mix(bg_2, accent, 0.28)
-    outline_variant = f"rgba({r}, {g}, {b}, 0.22)"
-
-    return f"""/**
- * @name system24 (WallpaperSync Material You)
- * @description Tema sincronizado dinamicamente com o wallpaper no estilo Material Design 3 / Material You.
- * @author refact0r (Adaptado para Material You por WallpaperSync)
-*/
-
-@import url('https://refact0r.github.io/system24/build/system24.css');
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
-body {{
-    /* Tipografia fluida e legível Material You */
-    --font: 'Inter', 'Figtree', 'Google Sans', system-ui, -apple-system, sans-serif;
-    --code-font: 'JetBrains Mono', 'DM Mono', monospace;
-    font-weight: 400;
-    letter-spacing: -0.01ch;
-
-    /* Espaçamento e Geometria M3 */
-    --gap: 14px;
-    --border-thickness: 1px;
-    --divider-thickness: 3px;
-    --border-hover-transition: 0.25s cubic-bezier(0.2, 0, 0, 1);
-
-    /* Formas Arredondadas Expressivas (Material You) */
-    --unrounding: off;
-    --round-pfp: on;
-
-    /* Desativa elementos de TUI para visual limpo */
-    --panel-labels: off;
-    --ascii-titles: off;
-    --ascii-loader: off;
-
-    /* Chatbar em cápsula flutuante separada */
-    --custom-chatbar: separated;
-    --chatbar-height: 54px;
-
-    /* Design Tokens de Curvatura do Material 3 */
-    --radius-sm: 8px;
-    --radius-md: 14px;
-    --radius-lg: 20px;
-    --radius-xl: 26px;
-    --radius-round: 9999px;
-}}
-
-:root {{
-    --colors: on;
-
-    /* Variáveis Tonal M3 */
-    --accent-rgb: {accent_rgb};
-    --outline: rgba(255, 255, 255, 0.08);
-    --outline-variant: {outline_variant};
-    --primary-container: {primary_container};
-
-    /* Cores de Texto (Paleta M3 On-Surface de alto contraste) */
-    --text-1: #f8f3f8;
-    --text-2: #ece5ec;
-    --text-3: #cac3ce;
-    --text-4: #958f99;
-    --text-5: #7a747d;
-
-    /* Fundo Tonal Material You (Extraído do Wallpaper) */
-    --bg-4: {bg_4};
-    --bg-3: {bg_3};
-    --bg-2: {bg_2};
-    --bg-1: {bg_1};
-
-    /* Cores de Destaque (Primary) */
-    --accent-1: {accent_1};
-    --accent-2: {accent_2};
-    --accent-3: {accent_3};
-    --accent-4: {accent_4};
-    --accent-new: {accent_new};
-
-    /* Interações com transição suave M3 */
-    --hover: rgba({accent_rgb}, 0.10);
-    --active: rgba({accent_rgb}, 0.20);
-    --border-hover: rgba({accent_rgb}, 0.35);
-
-    /* Status Indicators */
-    --online: #3dd68c;
-    --dnd: #ff5449;
-    --idle: #ffba28;
-    --offline: #7a747d;
-}}
-
-/* ===================================================
-   REGRAS VISUAIS: MATERIAL YOU (MATERIAL DESIGN 3)
-   =================================================== */
-
-/* 1. Painéis com cantos amplos (20px), superfícies tonais e elevação suave */
-.guilds__5e434,
-.sidebarList__5e434,
-.panels__5e434,
-.chatContent_f75fb0,
-.container_c8ffbb,
-.channelTextArea_f75fb0,
-.container__8a031,
-.peopleColumn__133bf {{
-    border-radius: 20px !important;
-    border: 1px solid var(--outline) !important;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2) !important;
-    transition: all 0.25s cubic-bezier(0.2, 0, 0, 1) !important;
-}}
-
-.guilds__5e434:hover,
-.sidebarList__5e434:hover,
-.panels__5e434:hover,
-.chatContent_f75fb0:hover,
-.container_c8ffbb:hover {{
-    border-color: var(--outline-variant) !important;
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28) !important;
-}}
-
-/* 2. Barra de digitação flutuante em formato de pílula M3 (Pill Bar) */
-.channelTextArea_f75fb0 {{
-    border-radius: 28px !important;
-    background-color: var(--bg-2) !important;
-    border: 1.5px solid var(--outline) !important;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
-    padding: 0 4px !important;
-}}
-
-.channelTextArea_f75fb0:focus-within {{
-    border-color: var(--accent-1) !important;
-    box-shadow: 0 4px 20px rgba(var(--accent-rgb), 0.22) !important;
-}}
-
-.scrollableContainer__74017 {{
-    border-radius: 24px !important;
-    background: transparent !important;
-}}
-
-/* 3. Lista de canais estilo Navigation Drawer do Android */
-.wrapper__2ea32 {{
-    border-radius: 20px !important;
-    margin: 2px 8px !important;
-    padding: 0 8px !important;
-    transition: all 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
-}}
-
-.wrapper__2ea32.modeSelected__2ea32 {{
-    background-color: var(--primary-container) !important;
-}}
-
-.wrapper__2ea32.modeSelected__2ea32 .name__2ea32 {{
-    color: var(--text-1) !important;
-    font-weight: 600 !important;
-}}
-
-.wrapper__2ea32:hover:not(.modeSelected__2ea32) {{
-    background-color: var(--hover) !important;
-}}
-
-/* 4. Mensagens com cantos suaves e margem fluida */
-.message__5126c {{
-    border-radius: 14px !important;
-    margin: 2px 12px !important;
-    transition: background-color 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
-}}
-
-.mentioned__5126c {{
-    background: var(--primary-container) !important;
-    border-left: 4px solid var(--accent-1) !important;
-    border-radius: 6px 14px 14px 6px !important;
-}}
-
-/* 5. Reações em formato de pílulas / chips */
-.reaction_f8896c {{
-    border-radius: 16px !important;
-    border: 1px solid var(--outline) !important;
-    background: var(--bg-2) !important;
-    transition: all 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
-}}
-
-.reaction_f8896c.reactionMe_f8896c {{
-    background-color: var(--primary-container) !important;
-    border-color: var(--accent-1) !important;
-}}
-
-/* 6. Botões em pílulas (Material Filled / Tonal Buttons) */
-button,
-.lookFilled__201d5,
-.button__201d5 {{
-    border-radius: 24px !important;
-    font-weight: 500 !important;
-    transition: all 0.2s cubic-bezier(0.2, 0, 0, 1) !important;
-}}
-
-.numberBadge__2b1f5,
-.badge__9293f {{
-    border-radius: 9999px !important;
-    font-weight: 600 !important;
-    background-color: var(--accent-1) !important;
-    color: #ffffff !important;
-    box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.3) !important;
-}}
-
-/* 7. Avatares circulares e suaves */
-.wrapper__44b0c foreignObject,
-.avatar_c19a55 {{
-    border-radius: 50% !important;
-}}
-
-/* 8. Modais, Popovers e Menus (Material Dialogs) */
-.menu_c1e9c4,
-.messagesPopoutWrap_b35704,
-.root_f9a4c9,
-.container__8a031 {{
-    border-radius: 24px !important;
-    border: 1px solid var(--outline) !important;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5) !important;
-    background-color: var(--bg-1) !important;
-}}
-
-.item_c1e9c4 {{
-    border-radius: 16px !important;
-    margin: 2px 6px !important;
-}}
-
-/* 9. Scrollbar fluida em pílula */
-::-webkit-scrollbar {{
-    width: 6px !important;
-    height: 6px !important;
-}}
-::-webkit-scrollbar-thumb {{
-    background: var(--outline-variant) !important;
-    border-radius: 9999px !important;
-}}
-::-webkit-scrollbar-thumb:hover {{
-    background: var(--accent-1) !important;
-}}
-::-webkit-scrollbar-track {{
-    background: transparent !important;
-}}
-"""
-
-
-def get_discord_theme_dirs() -> list[Path]:
-    """Retorna diretórios de temas de clientes Discord conhecidos (Equibop, Vesktop, Vencord, BetterDiscord)."""
-    candidates = [
-        Path.home() / ".var" / "app" / "org.equicord.equibop" / "config" / "equibop" / "themes",
-        Path.home() / ".config" / "equibop" / "themes",
-        Path.home() / ".config" / "vesktop" / "themes",
-        Path.home() / ".config" / "Vencord" / "themes",
-        Path.home() / ".config" / "BetterDiscord" / "themes",
-    ]
-    theme_dirs = []
-    for d in candidates:
-        if d.exists() or d.parent.exists():
-            try:
-                d.mkdir(parents=True, exist_ok=True)
-                theme_dirs.append(d)
-            except Exception:
-                pass
-    return theme_dirs
-
-
 def update_theme(
     wallpaper_path: Path | str | None = None,
     custom_accent: str | None = None,
@@ -1517,55 +1065,23 @@ def update_theme(
 
     updated_files = []
 
-    # 1. Atualiza midnight.theme.css se existir
-    if MIDNIGHT_THEME.exists():
-        midnight_css = generate_midnight_css(accent, tint)
-        try:
-            _write_text_if_changed(MIDNIGHT_THEME, midnight_css)
-            updated_files.append(MIDNIGHT_THEME.name)
-        except Exception as e:
-            print(f"[!] Erro ao salvar {MIDNIGHT_THEME}: {e}")
-
-    # 2. Atualiza system24.theme.css se existir
-    if SYSTEM24_THEME.exists():
-        system24_css = generate_system24_css(accent, tint)
-        try:
-            _write_text_if_changed(SYSTEM24_THEME, system24_css)
-            updated_files.append(SYSTEM24_THEME.name)
-        except Exception as e:
-            print(f"[!] Erro ao salvar {SYSTEM24_THEME}: {e}")
-
-    # Sincroniza links nos clientes Discord instalados
-    for ddir in get_discord_theme_dirs():
-        try:
-            target_sys24 = ddir / "system24.theme.css"
-            target_midnight = ddir / "midnight.theme.css"
-            if SYSTEM24_THEME.exists() and (not target_sys24.exists() or (target_sys24.is_symlink() and not target_sys24.resolve().exists())):
-                target_sys24.unlink(missing_ok=True)
-                target_sys24.symlink_to(SYSTEM24_THEME)
-            if MIDNIGHT_THEME.exists() and (not target_midnight.exists() or (target_midnight.is_symlink() and not target_midnight.resolve().exists())):
-                target_midnight.unlink(missing_ok=True)
-                target_midnight.symlink_to(MIDNIGHT_THEME)
-        except Exception as e:
-            print(f"[!] Erro ao sincronizar temas do Discord em {ddir}: {e}")
-
-    # 3. Atualiza o Terminal (Starship prompt)
+    # 1. Atualiza o Terminal (Starship prompt)
     if update_starship_theme(accent, tint):
         updated_files.append("Terminal Prompt (starship.toml)")
 
-    # 4. Atualiza o Terminal (Ptyxis palette)
+    # 2. Atualiza o Terminal (Ptyxis palette)
     if update_ptyxis_theme(accent, tint):
         updated_files.append("Terminal Emulator (Ptyxis wallpapersync.palette)")
 
-    # 5. Atualiza o Navegador Firefox (userChrome.css)
+    # 3. Atualiza o Navegador Firefox (userChrome.css)
     if update_firefox_theme(accent, tint):
         updated_files.append("Navegador Firefox (userChrome.css)")
 
-    # 6. Sincroniza accent color nativa do GNOME 47+ se suportado e somente se diferir
+    # 4. Sincroniza accent color nativa do GNOME 47+ se suportado e somente se diferir
     if sync_gnome_accent_color(accent):
         updated_files.append(f"GNOME Desktop Native Accent ({map_hex_to_gnome_accent(accent)})")
 
-    # 7. Gera e aplica o pacote de ícones dinâmico Material Design 3
+    # 5. Gera e aplica o pacote de ícones dinâmico Material Design 3
     is_dark = "dark" in (current_state.get("color_scheme") or "prefer-dark").lower()
     icons_updated, m3_scheme, active_icon_slot = sync_m3_icon_pack(
         accent_hex=accent,
@@ -1889,13 +1405,12 @@ def install_user_service():
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
     service_file = service_dir / "wallpapersync.service"
-    legacy_symlink = service_dir / "chromaleon-discord-sync.service"
 
     python_exec = sys.executable
     script_path = SCRIPT_DIR / "sync_theme.py"
 
     service_content = f"""[Unit]
-Description=WallpaperSync Theme Synchronizer (Discord, Terminal, Firefox)
+Description=WallpaperSync Theme Synchronizer (Terminal, Firefox, GNOME, Icons)
 After=graphical-session.target
 StartLimitIntervalSec=60
 StartLimitBurst=3
@@ -1911,11 +1426,6 @@ RestartSec=3
 WantedBy=default.target
 """
     service_file.write_text(service_content, encoding="utf-8")
-    try:
-        legacy_symlink.unlink(missing_ok=True)
-        legacy_symlink.symlink_to(service_file)
-    except Exception:
-        pass
 
     print(f"[✓] Arquivo de serviço criado em: {service_file}")
     print("\nPara ativar o serviço agora e habilitá-lo na inicialização, execute:")
@@ -1950,18 +1460,17 @@ def uninstall_all():
     """
     Desinstalação completa do WallpaperSync:
     1. Para e remove o serviço systemd.
-    2. Remove os links de temas no Discord/Equibop.
-    3. Remove as paletas geradas do Ptyxis e restaura o perfil para 'gnome'.
-    4. Remove as seções de paleta do starship.toml.
-    5. Remove o userChrome.css dinâmico dos perfis do Firefox.
-    6. Remove os slots de ícones Material Design 3 e restaura o tema de ícones anterior.
+    2. Remove as paletas geradas do Ptyxis e restaura o perfil para 'gnome'.
+    3. Remove as seções de paleta do starship.toml.
+    4. Remove o userChrome.css dinâmico dos perfis do Firefox.
+    5. Remove os slots de ícones Material Design 3 e restaura o tema de ícones anterior.
     """
     print("==================================================")
     print("      WallpaperSync — Desinstalação Completa      ")
     print("==================================================")
 
     # 1. Serviços systemd
-    print("\n[1/6] Parando e desabilitando serviços systemd...")
+    print("\n[1/5] Parando e desabilitando serviços systemd...")
     uninstall_user_service()
 
     # Remove o arquivo de cache de estado em $XDG_RUNTIME_DIR
@@ -1970,20 +1479,8 @@ def uninstall_all():
     except Exception:
         pass
 
-    # 2. Discord / Equibop
-    print("\n[2/6] Removendo temas do Discord / Equibop...")
-    for ddir in get_discord_theme_dirs():
-        for fname in ["system24.theme.css", "midnight.theme.css"]:
-            tpath = ddir / fname
-            if tpath.is_symlink() or tpath.exists():
-                try:
-                    tpath.unlink(missing_ok=True)
-                    print(f"  [✓] Removido: {tpath}")
-                except Exception as e:
-                    print(f"  [!] Erro ao remover {tpath}: {e}")
-
-    # 3. Ptyxis Terminal
-    print("\n[3/6] Restaurando paletas do terminal Ptyxis...")
+    # 2. Ptyxis Terminal
+    print("\n[2/5] Restaurando paletas do terminal Ptyxis...")
     palette_files = [
         PTYXIS_PALETTES_DIR / "wallpapersync.palette",
         PTYXIS_PALETTES_DIR / "chromaleon.palette",
@@ -2025,8 +1522,8 @@ def uninstall_all():
     except Exception:
         pass
 
-    # 4. Starship Prompt
-    print("\n[4/6] Restaurando ~/.config/starship.toml...")
+    # 3. Starship Prompt
+    print("\n[3/5] Restaurando ~/.config/starship.toml...")
     if STARSHIP_TOML.exists():
         try:
             txt = STARSHIP_TOML.read_text(encoding="utf-8")
@@ -2037,8 +1534,8 @@ def uninstall_all():
         except Exception as e:
             print(f"  [!] Erro ao limpar starship.toml: {e}")
 
-    # 5. Firefox
-    print("\n[5/6] Restaurando temas do Firefox...")
+    # 4. Firefox
+    print("\n[4/5] Restaurando temas do Firefox...")
     for pdir in get_firefox_profile_dirs():
         chrome_file = pdir / "chrome" / "userChrome.css"
         if chrome_file.exists():
@@ -2050,8 +1547,8 @@ def uninstall_all():
             except Exception as e:
                 print(f"  [!] Erro ao remover userChrome.css em {pdir}: {e}")
 
-    # 6. Pacote de ícones Material Design 3
-    print("\n[6/6] Removendo pacote de ícones Material Design 3...")
+    # 5. Pacote de ícones Material Design 3
+    print("\n[5/5] Removendo pacote de ícones Material Design 3...")
     removed_icons = uninstall_m3_icon_pack(gsettings_get_fn=gsettings_get, gsettings_set_fn=gsettings_set)
     for rpath in removed_icons:
         print(f"  [✓] Removido: {rpath}")

@@ -8,12 +8,11 @@ Este documento serve como referência completa para desenvolvedores, mantenedore
 
 O **WallpaperSync** é uma suíte de automação desenvolvida para extrair a paleta de cores dinâmica **diretamente do papel de parede ativo** do ambiente de desktop (GNOME, GSettings ou arquivo local) e sincronizá-la com aplicativos e ferramentas do sistema operacional:
 
-- **Discord / Equibop** (temas `midnight` e `system24` com suporte completo a Material You M3);
 - **Prompt do Terminal** (`starship.toml`);
 - **Emulador de Terminal GNOME** (`Ptyxis`);
 - **Navegador Web Firefox** (estilização dinâmica de abas horizontais e verticais, barra de URL e navegação via `userChrome.css`);
 - **Ambiente GNOME Desktop** (sincronização automática da chave nativa `accent-color` no GNOME 47+);
-- **Pacote de Ícones Material Design 3** (geração dinâmica de SVGs para pastas, locais, mimetypes e aplicativos adaptativos com hot-reload em `~/.local/share/icons/WallpaperSync-M3-{A,B}`).
+- **Pacote de Ícones Material Design 3** (geração dinâmica de SVGs para pastas e mimetypes + filtro tonal M3 preservando o formato original de todos os aplicativos em `~/.local/share/icons/WallpaperSync-M3-{A,B}`).
 
 > [!NOTE]
 > **Independência de Extensões**: O projeto não depende mais da extensão ChromaLeon nem de arquivos intermediários GTK (`custom-accent.css`). Toda a extração e cálculo de cores é realizada nativamente em Python via análise de imagem (Pillow), quantização adaptativa tonal e motor HCT do Material Design 3 (`m3_palette.py`).
@@ -39,13 +38,11 @@ flowchart TD
         E2 --> E3[Cores de Destaque, Tokens M3 e Superfícies Tinted]
     end
 
-    E3 -->|1. midnight.theme.css| F1[Equibop / Discord]
-    E3 -->|2. system24.theme.css| F1
-    E3 -->|3. starship.toml| F2[Starship Prompt]
-    E3 -->|4. wallpapersync.palette| F3[Ptyxis Terminal]
-    E3 -->|5. userChrome.css| F4[Navegador Firefox]
-    E3 -->|6. accent-color| F5[GNOME 47+ Native Accent]
-    E3 -->|7. m3_icons.py| F6[Pacote de Ícones M3 A/B]
+    E3 -->|1. starship.toml| F2[Starship Prompt]
+    E3 -->|2. wallpapersync.palette| F3[Ptyxis Terminal]
+    E3 -->|3. userChrome.css| F4[Navegador Firefox]
+    E3 -->|4. accent-color| F5[GNOME 47+ Native Accent]
+    E3 -->|5. m3_icons.py| F6[Pacote de Ícones M3 A/B]
 ```
 
 ---
@@ -71,31 +68,7 @@ O script central executa as seguintes etapas:
 
 ---
 
-### 3.2. Discord / Equibop (Flatpak)
-
-#### Temas Suportados
-1. **`midnight.theme.css`**:
-   - Estilo flutuante moderno com ilhas e painéis separados.
-   - `--gap: 12px;` e bordas com cantos arredondados suaves.
-2. **`system24.theme.css`**:
-   - Estilo Material You (Material Design 3).
-   - `--gap: 14px;`, cantos de 20px (`border-radius: 20px`), elevação com sombreamento suave, botões e barra de digitação em formato de pílula (*pill buttons*).
-
-#### Links Simbólicos
-Os temas em `/home/pedro/Imagens/Wallpapers/WallpaperSync/` estão linkados para a pasta de configuração do Equibop:
-- `~/.var/app/org.equicord.equibop/config/equibop/themes/midnight.theme.css`
-- `~/.var/app/org.equicord.equibop/config/equibop/themes/system24.theme.css`
-
-#### ⚠️ Isolamento do Flatpak para o Equibop
-- Para evitar problemas de renderização de janelas sem bordas no Electron/Wayland quando overrides de GTK estão presentes, mantenha o isolamento do Flatpak:
-  ```bash
-  flatpak override --user --nofilesystem=xdg-config/gtk-3.0 org.equicord.equibop
-  flatpak override --user --nofilesystem=xdg-config/gtk-4.0 org.equicord.equibop
-  ```
-
----
-
-### 3.3. Prompt Starship & Terminal Ptyxis
+### 3.2. Prompt Starship & Terminal Ptyxis
 
 1. **Starship (`~/.config/starship.toml`)**:
    - `sync_theme.py` atualiza a seção `[palettes.wallpapersync]` (e mantém `[palettes.chromaleon]` para retrocompatibilidade) e define `palette = 'wallpapersync'`, injetando a cor primária, variações e fundos tingidos nos componentes do prompt.
@@ -105,7 +78,7 @@ Os temas em `/home/pedro/Imagens/Wallpapers/WallpaperSync/` estão linkados para
 
 ---
 
-### 3.4. Navegador Web Firefox (`userChrome.css` & `user.js`)
+### 3.3. Navegador Web Firefox (`userChrome.css` & `user.js`)
 
 1. **Descoberta de Perfis**:
    - Varre automaticamente `~/.config/mozilla/firefox/` e `~/.mozilla/firefox/`, analisando o `profiles.ini` para localizar perfis ativos.
@@ -117,14 +90,14 @@ Os temas em `/home/pedro/Imagens/Wallpapers/WallpaperSync/` estão linkados para
 
 ---
 
-### 3.5. Pacote de Ícones Dinâmico Material Design 3 (`m3_palette.py` & `m3_icons.py`)
+### 3.4. Pacote de Ícones Dinâmico Material Design 3 (`m3_palette.py` & `m3_icons.py`)
 
 1. **Motor de Cores HCT (`m3_palette.py`)**:
    - Implementação em Python puro do modelo CAM16 / HCT do Material Design 3 (`SchemeTonalSpot`), derivando paletas tonais (`primary`, `secondary`, `tertiary`, `error`, `surfaceContainer*`, `outlineVariant`) para modos **Dark** e **Light** com contraste WCAG verificado.
    - Gera também tabelas LUT perceptuais (`build_icon_tint_luts`) para mapear ícones existentes para a matiz do papel de parede mantendo luminância, sombras e brancos/pretos legíveis.
 2. **Pastas, Mimetypes e Filtro Tonal para Todos os Apps (`m3_icons.py`)**:
    - Gera ícones vetoriais M3 em `~/.local/share/icons/WallpaperSync-M3-{A,B}/scalable/` para pastas (`places/`) e tipos de arquivo (`mimetypes/`).
-   - Descobre todos os aplicativos instalados (`.desktop` em sistema, usuário, Flatpak, Snap e `XDG_DATA_DIRS`), localiza o ícone original de cada app (`.svg`, `.svgz`, `.png`) e aplica o **filtro tonal M3 mantendo 100% do formato, silhueta, transparência e geometria original** em `scalable/apps/` e `256x256/apps/`.
+   - Descobre todos os aplicativos instalados (`.desktop` em sistema, usuário, Flatpak, Snap, AppImage e `XDG_DATA_DIRS`), localiza o ícone original de cada app (`.svg`, `.svgz`, `.png`, `.webp`, `.jpg`, `.ico`) e aplica o **filtro tonal M3 mantendo 100% do formato, silhueta, transparência e geometria original** em `scalable/apps/` e `256x256/apps/`.
    - Monta automaticamente a cadeia `Inherits=` no `index.theme` priorizando temas instalados no sistema (`MoreWaita`, `Papirus-Dark`/`Papirus`, `Adwaita`, `hicolor`).
 3. **Modos de Ícones (`--icon-mode` ou `WALLPAPERSYNC_ICON_MODE`)**:
    - `system` / `full` *(padrão)*: pastas e mimetypes em M3 + **todos os apps instalados** com filtro de cor Material Design 3 sobre seus ícones originais. A intensidade do filtro pode ser ajustada com `--icon-tint` (ou `WALLPAPERSYNC_ICON_TINT`, padrão `0.90`).
@@ -140,7 +113,7 @@ Os temas em `/home/pedro/Imagens/Wallpapers/WallpaperSync/` estão linkados para
 
 ### 4.1. Serviço do Usuário
 O serviço roda sob a sessão do systemd do usuário:
-- **Arquivo**: `~/.config/systemd/user/wallpapersync.service` (com link simbólico de compatibilidade `chromaleon-discord-sync.service`)
+- **Arquivo**: `~/.config/systemd/user/wallpapersync.service`
 - **Comando executado**: `python3 -u /home/pedro/Imagens/Wallpapers/WallpaperSync/sync_theme.py --watch`
 
 ### 4.2. Detecção de Mudança de Wallpaper em Tempo Real
@@ -161,13 +134,10 @@ O serviço roda sob a sessão do systemd do usuário:
 |---|---|---|
 | `/home/pedro/Imagens/Wallpapers/WallpaperSync/sync_theme.py` | Código-fonte principal | Daemon de monitoramento, conversão de cores e controle D-Bus |
 | `/home/pedro/Imagens/Wallpapers/WallpaperSync/m3_palette.py` | Módulo M3 | Motor de cores CAM16 / HCT e tokens tonais Material Design 3 |
-| `/home/pedro/Imagens/Wallpapers/WallpaperSync/m3_icons.py` | Módulo M3 Icons | Gerador de SVGs Freedesktop e hot-reloader de slots no GNOME |
-| `/home/pedro/Imagens/Wallpapers/WallpaperSync/midnight.theme.css` | Gerado por `sync_theme.py` | Tema Discord Midnight sincronizado |
-| `/home/pedro/Imagens/Wallpapers/WallpaperSync/system24.theme.css` | Gerado por `sync_theme.py` | Tema Discord System24 (Material You M3) sincronizado |
+| `/home/pedro/Imagens/Wallpapers/WallpaperSync/m3_icons.py` | Módulo M3 Icons | Gerador de SVGs Freedesktop, filtro tonal M3 e hot-reloader de slots no GNOME |
 | `/home/pedro/Imagens/Wallpapers/WallpaperSync/firefox-userChrome.css` | Gerado por `sync_theme.py` | Cópia local de referência do tema do Firefox |
 | `~/.local/share/icons/WallpaperSync-M3-{A,B}/` | Gerado por `m3_icons.py` | Slots alternados do pacote de ícones dinâmico Material Design 3 |
 | `~/.config/systemd/user/wallpapersync.service` | Serviço systemd | Autostart do monitoramento no login do usuário |
-| `~/.var/app/org.equicord.equibop/config/equibop/themes/` | Links simbólicos | Diretório onde o Equibop carrega os temas |
 | `~/.config/starship.toml` | Arquivo do sistema | Configuração do prompt do shell |
 | `~/.local/share/org.gnome.Ptyxis/palettes/wallpapersync.palette` | Paleta gerada | Paleta dinâmica para o terminal Ptyxis |
 | `~/.config/mozilla/firefox/<perfil>/chrome/userChrome.css` | Arquivo gerado | Estilos dinâmicos de interface para o Firefox |

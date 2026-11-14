@@ -1,5 +1,5 @@
 [Unit]
-Description=WallpaperSync Theme Synchronizer (Discord, Terminal, Firefox)
+Description=WallpaperSync Theme Synchronizer (Terminal, Firefox, GNOME, Icons)
 After=graphical-session.target
 StartLimitIntervalSec=60
 StartLimitBurst=3
