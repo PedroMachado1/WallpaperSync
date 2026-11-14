@@ -238,6 +238,82 @@ class TestM3Icons(unittest.TestCase):
             self.assertIn("Size=256", index_txt)
             self.assertIn("Type=Scalable", index_txt)
 
+    def test_appimage_absolute_icon_bridge_and_loose_icon_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xdg_home = root / "home_share"
+            user_apps = xdg_home / "applications"
+            user_icons = xdg_home / "icons"
+            user_apps.mkdir(parents=True)
+            user_icons.mkdir(parents=True)
+
+            # Ícone de AppImage em caminho absoluto (ex: Gear Lever)
+            appimage_icon = root / "AppImages" / ".icons" / "amethyst.png"
+            appimage_icon.parent.mkdir(parents=True)
+            Image.new("RGBA", (64, 64), (160, 40, 230, 255)).save(appimage_icon)
+
+            amethyst_desktop = user_apps / "amethyst.desktop"
+            orig_desktop_txt = (
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Amethyst Mod Manager\n"
+                f"Icon={appimage_icon}\n"
+            )
+            amethyst_desktop.write_text(orig_desktop_txt, encoding="utf-8")
+
+            # Ícone solto em ~/.local/share/icons/amethyst_loose.png
+            Image.new("RGBA", (32, 32), (20, 120, 240, 255)).save(user_icons / "amethyst_loose.png")
+            (user_apps / "loose.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=Loose\nIcon=amethyst_loose\n",
+                encoding="utf-8",
+            )
+
+            fake_gsettings = {"icon-theme": "Adwaita"}
+
+            def fake_get(schema, key):
+                return fake_gsettings["icon-theme"] if key == "icon-theme" else None
+
+            def fake_set(schema, key, value):
+                if key == "icon-theme":
+                    fake_gsettings["icon-theme"] = value
+                    return True
+                return False
+
+            with mock.patch.dict(
+                os.environ,
+                {"XDG_DATA_HOME": str(xdg_home), "XDG_DATA_DIRS": str(root / "empty_sys")},
+            ):
+                ok, _, slot = sync_m3_icon_pack(
+                    "#e01b24",
+                    is_dark=True,
+                    mode="system",
+                    gsettings_get_fn=fake_get,
+                    gsettings_set_fn=fake_set,
+                )
+                self.assertTrue(ok)
+                self.assertEqual(slot, ICON_SLOT_A)
+
+                # .desktop do usuário foi atualizado para o nome temático reversível
+                bridged_txt = amethyst_desktop.read_text(encoding="utf-8")
+                self.assertIn("Icon=wallpapersync-app-amethyst", bridged_txt)
+
+                # Backup original intacto existe em hicolor e ícone tingido existe no slot M3
+                self.assertTrue((user_icons / "hicolor" / "256x256" / "apps" / "wallpapersync-app-amethyst.png").is_file())
+                tinted_amethyst = user_icons / ICON_SLOT_A / "256x256" / "apps" / "wallpapersync-app-amethyst.png"
+                self.assertTrue(tinted_amethyst.is_file())
+                with Image.open(tinted_amethyst) as img:
+                    r, g, b, a = img.getpixel((32, 32))
+                    self.assertEqual(a, 255)
+                    self.assertGreater(r, b)  # Roxo virou vermelho M3
+
+                # Ícone solto em ~/.local/share/icons/ também foi capturado
+                self.assertTrue((user_icons / ICON_SLOT_A / "256x256" / "apps" / "amethyst_loose.png").is_file())
+
+                # Desinstalação restaura o Icon=/abs/path original intacto no .desktop
+                uninstall_m3_icon_pack(gsettings_get_fn=fake_get, gsettings_set_fn=fake_set)
+                self.assertEqual(amethyst_desktop.read_text(encoding="utf-8"), orig_desktop_txt)
+                self.assertFalse((user_icons / "hicolor" / "256x256" / "apps" / "wallpapersync-app-amethyst.png").exists())
+
     def test_dual_slot_hot_reload_and_uninstall(self):
         with tempfile.TemporaryDirectory() as tmp:
             xdg_data = Path(tmp) / "share"

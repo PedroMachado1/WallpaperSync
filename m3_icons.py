@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -32,6 +34,7 @@ ICON_SLOT_B = "WallpaperSync-M3-B"
 ICON_SLOTS = (ICON_SLOT_A, ICON_SLOT_B)
 VALID_ICON_MODES = ("system", "full", "places", "squircle", "off")
 DEFAULT_ICON_TINT_STRENGTH = 0.90
+_SUPPORTED_ICON_EXTENSIONS = (".svg", ".svgz", ".png", ".webp", ".jpg", ".jpeg", ".ico", ".xpm")
 
 
 def get_icons_base_dir() -> Path:
@@ -43,6 +46,256 @@ def get_icons_base_dir() -> Path:
 
 def get_prev_icon_theme_marker() -> Path:
     return get_icons_base_dir() / ".wallpapersync_prev_icon_theme"
+
+
+def get_bridged_desktop_icons_manifest() -> Path:
+    return get_icons_base_dir() / ".wallpapersync_desktop_icons.json"
+
+
+def _get_user_applications_dir() -> Path:
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg_data) if xdg_data else (Path.home() / ".local" / "share")
+    return base / "applications"
+
+
+def _rewrite_desktop_icon_value(txt: str, new_icon: str) -> tuple[str | None, str | None]:
+    """
+    Substitui o campo `Icon=` apenas na seção `[Desktop Entry]`, preservando todo o restante
+    do arquivo `.desktop`. Retorna `(old_icon_value, new_text)` ou `(None, None)`.
+    """
+    lines = txt.splitlines(keepends=True)
+    in_main = False
+    for idx, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            sec = stripped[1:-1].strip()
+            if sec == "Desktop Entry":
+                in_main = True
+                continue
+            elif in_main:
+                break
+            else:
+                continue
+        if not in_main:
+            continue
+        m = re.match(r"^(\s*Icon\s*=\s*)(.*?)(\r?\n?)$", raw_line)
+        if m:
+            old_val = m.group(2).strip("\"' ")
+            newline = m.group(3)
+            lines[idx] = f"{m.group(1)}{new_icon}{newline}"
+            return old_val, "".join(lines)
+    return None, None
+
+
+def _copy_icon_to_hicolor_backup(src_path: Path, hicolor_dir: Path, theme_icon_name: str) -> Path | None:
+    """Salva uma cópia intacta do ícone original em `hicolor` como fallback seguro."""
+    ext = src_path.suffix.lower()
+    if ext in (".svg", ".svgz"):
+        dst = hicolor_dir / "scalable" / "apps" / f"{theme_icon_name}{ext}"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dst)
+        return dst
+
+    dst = hicolor_dir / "256x256" / "apps" / f"{theme_icon_name}.png"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if ext == ".png":
+        shutil.copy2(src_path, dst)
+        return dst
+    try:
+        from PIL import Image
+
+        with Image.open(src_path) as img:
+            img.convert("RGBA").save(dst, format="PNG")
+        return dst
+    except Exception:
+        return None
+
+
+def bridge_user_desktop_absolute_icons() -> dict[str, dict[str, str]]:
+    """
+    AppImages (ex: Gear Lever, AppImageLauncher ou .desktop manuais) frequentemente usam
+    caminhos absolutos `Icon=/caminho/.../icone.png` em `~/.local/share/applications/*.desktop`,
+    o que faz o GNOME Shell ignorar temas Freedesktop.
+
+    Esta função cria uma ponte 100% reversível:
+      1. Salva cópia intacta do ícone original em `~/.local/share/icons/hicolor/.../apps/`
+         (garantindo fallback caso outro tema ou `--icon-mode places` seja usado).
+      2. Registra o caminho original em `.wallpapersync_desktop_icons.json`.
+      3. Atualiza `Icon=` no `.desktop` do usuário para o nome temático `wallpapersync-app-*`.
+    """
+    manifest_path = get_bridged_desktop_icons_manifest()
+    manifest: dict[str, dict[str, str]] = {}
+    if manifest_path.exists():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                manifest = loaded
+        except Exception:
+            manifest = {}
+
+    user_apps_dir = _get_user_applications_dir()
+    if not user_apps_dir.is_dir():
+        return manifest
+
+    hicolor_dir = get_icons_base_dir() / "hicolor"
+    used_names: set[str] = {
+        str(entry.get("theme_icon_name"))
+        for entry in manifest.values()
+        if isinstance(entry, dict) and entry.get("theme_icon_name")
+    }
+    changed = False
+
+    try:
+        desktop_files = sorted(user_apps_dir.rglob("*.desktop"))
+    except OSError:
+        desktop_files = []
+
+    for dfile in desktop_files:
+        # Nunca modifica symlinks (ex: exportados pelo Flatpak/Snap) ou arquivos somente leitura
+        if dfile.is_symlink() or not os.access(dfile, os.W_OK):
+            continue
+        try:
+            txt = dfile.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        dkey = str(dfile)
+        existing = manifest.get(dkey)
+
+        # Verifica qual o valor atual de Icon= na seção principal
+        cur_icon = None
+        in_main = False
+        is_hidden = False
+        for raw_line in txt.splitlines():
+            s = raw_line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if s.startswith("[") and s.endswith("]"):
+                sec = s[1:-1].strip()
+                if sec == "Desktop Entry":
+                    in_main = True
+                    continue
+                elif in_main:
+                    break
+                else:
+                    continue
+            if in_main and "=" in s:
+                k, v = s.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if k == "Hidden" and v.lower() == "true":
+                    is_hidden = True
+                    break
+                if k == "Icon" and v:
+                    cur_icon = v.strip("\"' ")
+
+        if is_hidden or not cur_icon:
+            continue
+
+        # Se já está usando nosso nome ponte, garante apenas que o backup hicolor exista
+        if isinstance(existing, dict) and cur_icon == existing.get("theme_icon_name"):
+            orig_p = Path(existing.get("original_icon", "")).expanduser()
+            backup_p = Path(existing.get("hicolor_backup", ""))
+            if orig_p.is_file() and (not backup_p.exists() or orig_p.stat().st_mtime > backup_p.stat().st_mtime):
+                new_bk = _copy_icon_to_hicolor_backup(orig_p, hicolor_dir, cur_icon)
+                if new_bk:
+                    existing["hicolor_backup"] = str(new_bk)
+                    changed = True
+            continue
+
+        # Só faz ponte para caminhos absolutos ou ~/...
+        if not (cur_icon.startswith("/") or cur_icon.startswith("~/")):
+            continue
+
+        orig_path = Path(cur_icon).expanduser()
+        if not orig_path.is_file() or orig_path.suffix.lower() not in _SUPPORTED_ICON_EXTENSIONS:
+            continue
+
+        safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", dfile.stem).strip("-") or "app"
+        theme_icon_name = f"wallpapersync-app-{safe_stem}"
+        if theme_icon_name in used_names:
+            digest = hashlib.sha1(dkey.encode("utf-8")).hexdigest()[:6]
+            theme_icon_name = f"wallpapersync-app-{safe_stem}-{digest}"
+
+        backup_path = _copy_icon_to_hicolor_backup(orig_path, hicolor_dir, theme_icon_name)
+        if backup_path is None:
+            continue
+
+        old_val, new_txt = _rewrite_desktop_icon_value(txt, theme_icon_name)
+        if old_val and new_txt:
+            try:
+                dfile.write_text(new_txt, encoding="utf-8")
+                used_names.add(theme_icon_name)
+                manifest[dkey] = {
+                    "original_icon": cur_icon,
+                    "theme_icon_name": theme_icon_name,
+                    "hicolor_backup": str(backup_path),
+                }
+                changed = True
+            except OSError:
+                continue
+
+    if changed:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    return manifest
+
+
+def restore_bridged_desktop_icons() -> list[Path]:
+    """
+    Restaura todos os `.desktop` de usuário que tinham `Icon=/caminho/absoluto`
+    de volta aos valores originais e remove os backups temporários de `hicolor`.
+    """
+    removed: list[Path] = []
+    manifest_path = get_bridged_desktop_icons_manifest()
+    if not manifest_path.exists():
+        return removed
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+
+    if isinstance(manifest, dict):
+        for dfile_str, entry in manifest.items():
+            if not isinstance(entry, dict):
+                continue
+            dfile = Path(dfile_str)
+            orig_icon = entry.get("original_icon")
+            theme_icon = entry.get("theme_icon_name")
+            backup_str = entry.get("hicolor_backup")
+
+            if dfile.is_file() and not dfile.is_symlink() and orig_icon and theme_icon:
+                try:
+                    txt = dfile.read_text(encoding="utf-8", errors="ignore")
+                    cur_val, new_txt = _rewrite_desktop_icon_value(txt, orig_icon)
+                    if cur_val == theme_icon and new_txt:
+                        dfile.write_text(new_txt, encoding="utf-8")
+                except OSError:
+                    pass
+
+            if backup_str:
+                bp = Path(backup_str)
+                if bp.exists() or bp.is_symlink():
+                    try:
+                        bp.unlink(missing_ok=True)
+                        removed.append(bp)
+                    except OSError:
+                        pass
+
+    try:
+        manifest_path.unlink(missing_ok=True)
+        removed.append(manifest_path)
+    except OSError:
+        pass
+
+    return removed
 
 
 def get_icon_tint_strength() -> float:
@@ -136,12 +389,12 @@ def discover_installed_app_icons() -> set[str]:
             if is_hidden or not icon_val:
                 continue
             # Caminhos absolutos são carregados direto do disco e não podem ser
-            # sobrescritos via especificação de tema Freedesktop.
-            if icon_val.startswith("/"):
+            # sobrescritos via tema Freedesktop (exceto quando pontuados via bridge).
+            if icon_val.startswith("/") or icon_val.startswith("~/"):
                 continue
 
             lower_val = icon_val.lower()
-            for ext in (".png", ".svgz", ".svg", ".xpm"):
+            for ext in (".png", ".svgz", ".svg", ".webp", ".jpg", ".jpeg", ".ico", ".xpm"):
                 if lower_val.endswith(ext):
                     icon_val = icon_val[: -len(ext)]
                     break
@@ -187,16 +440,25 @@ def index_system_app_icons(
     preferred_theme: str | None = None,
 ) -> dict[str, Path]:
     """
-    Localiza o arquivo de ícone original (.svg, .svgz, .png, .xpm) para cada nome
-    em `wanted_names`, respeitando a prioridade:
-      tema base preferido > hicolor > Adwaita > demais temas > pixmaps,
+    Localiza o arquivo de ícone original (.svg, .svgz, .png, .webp, .jpg, .ico, .xpm)
+    para cada nome em `wanted_names`, respeitando a prioridade:
+      tema base preferido > hicolor / ícones soltos > Adwaita > demais temas > pixmaps,
     e preferindo sempre SVG vetorial ou a maior resolução disponível.
     Nunca lê os slots gerados `WallpaperSync-M3-{A,B}`.
     """
     if not wanted_names:
         return {}
 
-    format_prio_map = {".svg": 4, ".svgz": 3, ".png": 2, ".xpm": 1}
+    format_prio_map = {
+        ".svg": 5,
+        ".svgz": 4,
+        ".png": 3,
+        ".webp": 2,
+        ".jpg": 2,
+        ".jpeg": 2,
+        ".ico": 1,
+        ".xpm": 1,
+    }
     best: dict[str, tuple[tuple[int, int, int], Path]] = {}
 
     def _consider(icon_name: str, fpath: Path, theme_prio: int, size_score: int) -> None:
@@ -233,11 +495,17 @@ def index_system_app_icons(
         if not root.is_dir():
             continue
         try:
-            theme_dirs = list(root.iterdir())
+            entries = list(root.iterdir())
         except OSError:
             continue
 
-        for theme_dir in theme_dirs:
+        for theme_dir in entries:
+            # Ícones soltos diretamente em ~/.local/share/icons/ ou ~/.icons/ (comum em AppImages)
+            if theme_dir.is_file():
+                if theme_dir.suffix.lower() in format_prio_map:
+                    _consider(theme_dir.stem, theme_dir, 3, 128)
+                continue
+
             if not theme_dir.is_dir() or theme_dir.name in ICON_SLOTS:
                 continue
             t_prio = _theme_priority(theme_dir.name)
@@ -276,14 +544,15 @@ def index_system_app_icons(
                     except OSError:
                         pass
 
-    pixmaps_dir = Path("/usr/share/pixmaps")
-    if pixmaps_dir.is_dir():
-        try:
-            for entry in pixmaps_dir.iterdir():
-                if entry.suffix.lower() in format_prio_map:
-                    _consider(entry.stem, entry, 0, 64)
-        except OSError:
-            pass
+    pixmaps_dirs = [base / "pixmaps" for base in _get_xdg_data_dirs()]
+    for pixmaps_dir in pixmaps_dirs:
+        if pixmaps_dir.is_dir():
+            try:
+                for entry in pixmaps_dir.iterdir():
+                    if entry.suffix.lower() in format_prio_map:
+                        _consider(entry.stem, entry, 0, 64)
+            except OSError:
+                pass
 
     return {name: path for name, (_, path) in best.items()}
 
@@ -1326,7 +1595,10 @@ def sync_m3_icon_pack(
     Retorna `(updated: bool, m3_scheme: dict, active_slot: str | None)`.
     """
     scheme = build_m3_scheme(accent_hex, is_dark=is_dark)
-    if mode == "off" or mode not in VALID_ICON_MODES:
+    if mode not in VALID_ICON_MODES:
+        return False, scheme, None
+    if mode == "off":
+        restore_bridged_desktop_icons()
         return False, scheme, None
 
     icons_base = get_icons_base_dir()
@@ -1343,6 +1615,11 @@ def sync_m3_icon_pack(
             marker.write_text(current_theme + "\n", encoding="utf-8")
         except OSError:
             pass
+
+    if mode in ("system", "full"):
+        bridge_user_desktop_absolute_icons()
+    else:
+        restore_bridged_desktop_icons()
 
     preferred_base_theme = _resolve_preferred_base_theme(current_theme)
     next_slot = ICON_SLOT_B if current_theme == ICON_SLOT_A else ICON_SLOT_A
@@ -1369,10 +1646,12 @@ def sync_m3_icon_pack(
 
 def uninstall_m3_icon_pack(gsettings_get_fn=None, gsettings_set_fn=None) -> list[Path]:
     """
-    Remove os slots WallpaperSync-M3-{A,B} e restaura o tema de ícones anterior
-    do usuário (ou 'Adwaita' como fallback seguro).
+    Remove os slots WallpaperSync-M3-{A,B}, restaura o tema de ícones anterior
+    do usuário e reverte eventuais pontes de `.desktop` com caminhos absolutos.
     """
     removed: list[Path] = []
+    removed.extend(restore_bridged_desktop_icons())
+
     icons_base = get_icons_base_dir()
     marker = get_prev_icon_theme_marker()
 
