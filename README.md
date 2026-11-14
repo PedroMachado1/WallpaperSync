@@ -121,16 +121,18 @@ Os temas em `/home/pedro/Imagens/Wallpapers/WallpaperSync/` estão linkados para
 
 1. **Motor de Cores HCT (`m3_palette.py`)**:
    - Implementação em Python puro do modelo CAM16 / HCT do Material Design 3 (`SchemeTonalSpot`), derivando paletas tonais (`primary`, `secondary`, `tertiary`, `error`, `surfaceContainer*`, `outlineVariant`) para modos **Dark** e **Light** com contraste WCAG verificado.
-2. **Geração de SVGs Freedesktop (`m3_icons.py`)**:
-   - Gera ícones vetoriais em `~/.local/share/icons/WallpaperSync-M3-{A,B}/scalable/` para pastas (`places/`), tipos de arquivo (`mimetypes/`) e aplicativos adaptativos em squircle Material You (`apps/`).
+   - Gera também tabelas LUT perceptuais (`build_icon_tint_luts`) para mapear ícones existentes para a matiz do papel de parede mantendo luminância, sombras e brancos/pretos legíveis.
+2. **Pastas, Mimetypes e Filtro Tonal para Todos os Apps (`m3_icons.py`)**:
+   - Gera ícones vetoriais M3 em `~/.local/share/icons/WallpaperSync-M3-{A,B}/scalable/` para pastas (`places/`) e tipos de arquivo (`mimetypes/`).
+   - Descobre todos os aplicativos instalados (`.desktop` em sistema, usuário, Flatpak, Snap e `XDG_DATA_DIRS`), localiza o ícone original de cada app (`.svg`, `.svgz`, `.png`) e aplica o **filtro tonal M3 mantendo 100% do formato, silhueta, transparência e geometria original** em `scalable/apps/` e `256x256/apps/`.
    - Monta automaticamente a cadeia `Inherits=` no `index.theme` priorizando temas instalados no sistema (`MoreWaita`, `Papirus-Dark`/`Papirus`, `Adwaita`, `hicolor`).
 3. **Modos de Ícones (`--icon-mode` ou `WALLPAPERSYNC_ICON_MODE`)**:
-   - `system` *(padrão)*: pastas + locais + mimetypes + ícones de apps integrados do GNOME (Nautilus, Ptyxis, Settings, TextEditor, Calculator, SystemMonitor, Software).
-   - `full`: inclui também ícones temáticos M3 para apps populares (Firefox, Equibop/Discord, VS Code, Spotify, VLC).
+   - `system` / `full` *(padrão)*: pastas e mimetypes em M3 + **todos os apps instalados** com filtro de cor Material Design 3 sobre seus ícones originais. A intensidade do filtro pode ser ajustada com `--icon-tint` (ou `WALLPAPERSYNC_ICON_TINT`, padrão `0.90`).
    - `places`: apenas pastas, locais e mimetypes.
+   - `squircle`: estilo opcional com squircles uniformes Material You para apps principais.
    - `off`: desativa a geração de ícones.
 4. **Hot-Reload Atômico no GNOME**:
-   - Alterna automaticamente entre dois slots (`WallpaperSync-M3-A` ↔ `WallpaperSync-M3-B`) via `gsettings`, forçando o Nautilus e o GNOME Shell a recarregarem os SVGs instantaneamente sem reiniciar a sessão. O tema original do usuário é salvo para restauração no `--uninstall`.
+   - Alterna automaticamente entre dois slots (`WallpaperSync-M3-A` ↔ `WallpaperSync-M3-B`) via `gsettings`, forçando o Nautilus e o GNOME Shell a recarregarem os ícones instantaneamente sem reiniciar a sessão. O tema original do usuário é salvo para restauração no `--uninstall`.
 
 ---
 
@@ -182,9 +184,9 @@ O serviço roda sob a sessão do systemd do usuário:
   python3 sync_theme.py
   ```
 
-- **Escolher o modo do pacote de ícones Material Design 3 (`system`, `full`, `places`, `off`)**:
+- **Escolher o modo do pacote de ícones Material Design 3 (`system`, `full`, `places`, `squircle`, `off`) e força do filtro (`--icon-tint`)**:
   ```bash
-  python3 sync_theme.py --icon-mode full --force
+  python3 sync_theme.py --icon-mode system --icon-tint 0.90 --force
   ```
 
 - **Gerar pré-visualização HTML interativa da paleta e dos ícones M3**:

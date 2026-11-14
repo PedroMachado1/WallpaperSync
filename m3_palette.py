@@ -496,3 +496,116 @@ def build_m3_scheme(seed_hex: str, is_dark: bool = True) -> dict[str, str]:
         }
 
     return scheme
+
+
+def _smoothstep(edge0: float, edge1: float, x: float) -> float:
+    if x <= edge0:
+        return 0.0
+    if x >= edge1:
+        return 1.0
+    t = (x - edge0) / (edge1 - edge0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def build_icon_tint_luts(
+    seed_hex: str,
+) -> tuple[list[tuple[int, int, int]], list[tuple[int, int, int]]]:
+    """
+    Constrói duas tabelas de consulta RGB de 256 entradas (`lut_primary`, `lut_neutral`)
+    preservando a luminância perceptual (CIE L* / Tone) no espaço HCT do Material Design 3.
+
+    - `lut_primary`: aplica matiz e croma primários do wallpaper nas regiões cromáticas,
+      atenuando suavemente próximo ao preto puro e branco puro para manter contraste.
+    - `lut_neutral`: aplica leve matização neutra para áreas originalmente cinzentas/brancas/pretas.
+    """
+    hue, src_chroma, _ = hex_to_hct(seed_hex)
+    if src_chroma < 8.0:
+        primary_chroma = 24.0
+        neutral_chroma = 8.0
+    else:
+        primary_chroma = max(38.0, min(72.0, src_chroma * 0.95))
+        neutral_chroma = max(6.0, min(14.0, primary_chroma * 0.22))
+
+    # 33 pontos-chave (passo 8 + 255) para geração sub-20ms e interpolação linear exata
+    keyframes = list(range(0, 256, 8))
+    if keyframes[-1] != 255:
+        keyframes.append(255)
+
+    p_keys: dict[int, tuple[int, int, int]] = {}
+    n_keys: dict[int, tuple[int, int, int]] = {}
+
+    for v in keyframes:
+        tone = lstar_from_rgb(v, v, v)
+        if tone <= 4.0 or tone >= 97.0:
+            envelope = 0.0
+        else:
+            envelope = _smoothstep(4.0, 24.0, tone) * (1.0 - _smoothstep(72.0, 97.0, tone))
+
+        if envelope <= 0.001:
+            rgb = (v, v, v)
+            p_keys[v] = rgb
+            n_keys[v] = rgb
+        else:
+            c_p = primary_chroma * envelope
+            c_n = neutral_chroma * _smoothstep(5.0, 22.0, tone) * (1.0 - _smoothstep(78.0, 97.0, tone))
+            p_keys[v] = hex_to_rgb(hct_to_hex(hue, c_p, tone))
+            n_keys[v] = hex_to_rgb(hct_to_hex(hue, c_n, tone))
+
+    lut_primary: list[tuple[int, int, int]] = [(0, 0, 0)] * 256
+    lut_neutral: list[tuple[int, int, int]] = [(0, 0, 0)] * 256
+
+    for idx in range(len(keyframes) - 1):
+        k0 = keyframes[idx]
+        k1 = keyframes[idx + 1]
+        span = float(k1 - k0)
+        pr0, pg0, pb0 = p_keys[k0]
+        pr1, pg1, pb1 = p_keys[k1]
+        nr0, ng0, nb0 = n_keys[k0]
+        nr1, ng1, nb1 = n_keys[k1]
+        for v in range(k0, k1 + 1):
+            t = (v - k0) / span
+            lut_primary[v] = (
+                int(round(pr0 + (pr1 - pr0) * t)),
+                int(round(pg0 + (pg1 - pg0) * t)),
+                int(round(pb0 + (pb1 - pb0) * t)),
+            )
+            lut_neutral[v] = (
+                int(round(nr0 + (nr1 - nr0) * t)),
+                int(round(ng0 + (ng1 - ng0) * t)),
+                int(round(nb0 + (nb1 - nb0) * t)),
+            )
+
+    return lut_primary, lut_neutral
+
+
+def recolor_rgb_m3(
+    r: int,
+    g: int,
+    b: int,
+    lut_primary: list[tuple[int, int, int]],
+    lut_neutral: list[tuple[int, int, int]],
+    strength: float = 0.90,
+) -> tuple[int, int, int]:
+    """
+    Aplica o filtro tonal Material Design 3 a uma cor RGB (0-255), preservando
+    sua luminância (Rec.601 para paridade exata com Pillow 'L') e separação tonal.
+    """
+    lum = max(0, min(255, int(round(0.299 * r + 0.587 * g + 0.114 * b))))
+    mx = max(r, g, b)
+    mn = min(r, g, b)
+    sat_hsv = ((mx - mn) / mx) if mx > 0 else 0.0
+    sat_w = min(1.0, sat_hsv * 1.8)
+
+    pr, pg, pb = lut_primary[lum]
+    nr, ng, nb = lut_neutral[lum]
+
+    tr = nr + (pr - nr) * sat_w
+    tg = ng + (pg - ng) * sat_w
+    tb = nb + (pb - nb) * sat_w
+
+    s = max(0.0, min(1.0, float(strength)))
+    out_r = max(0, min(255, int(round(r + (tr - r) * s))))
+    out_g = max(0, min(255, int(round(g + (tg - g) * s))))
+    out_b = max(0, min(255, int(round(b + (tb - b) * s))))
+    return (out_r, out_g, out_b)
+

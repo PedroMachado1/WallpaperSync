@@ -15,18 +15,23 @@ Inclui:
 
 from __future__ import annotations
 
+import base64
+import gzip
+import io
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
-from m3_palette import build_m3_scheme
+from m3_palette import build_icon_tint_luts, build_m3_scheme, recolor_rgb_m3, rgb_to_hex
 
 
 ICON_SLOT_A = "WallpaperSync-M3-A"
 ICON_SLOT_B = "WallpaperSync-M3-B"
 ICON_SLOTS = (ICON_SLOT_A, ICON_SLOT_B)
-VALID_ICON_MODES = ("system", "full", "places", "off")
+VALID_ICON_MODES = ("system", "full", "places", "squircle", "off")
+DEFAULT_ICON_TINT_STRENGTH = 0.90
 
 
 def get_icons_base_dir() -> Path:
@@ -38,6 +43,573 @@ def get_icons_base_dir() -> Path:
 
 def get_prev_icon_theme_marker() -> Path:
     return get_icons_base_dir() / ".wallpapersync_prev_icon_theme"
+
+
+def get_icon_tint_strength() -> float:
+    """Retorna a intensidade do filtro tonal M3 aplicado aos ícones de apps (0.0 a 1.0)."""
+    raw = os.environ.get("WALLPAPERSYNC_ICON_TINT", "").strip()
+    if raw:
+        try:
+            return max(0.0, min(1.0, float(raw)))
+        except ValueError:
+            pass
+    return DEFAULT_ICON_TINT_STRENGTH
+
+
+def _get_xdg_data_dirs() -> list[Path]:
+    """Retorna diretórios XDG_DATA_DIRS combinados com caminhos padrão do sistema."""
+    dirs: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(p)
+
+    xdg_home = os.environ.get("XDG_DATA_HOME")
+    _add(Path(xdg_home) if xdg_home else (Path.home() / ".local" / "share"))
+    _add(Path.home() / ".local" / "share" / "flatpak" / "exports" / "share")
+    _add(Path("/var/lib/flatpak/exports/share"))
+    _add(Path("/var/lib/snapd/desktop"))
+    _add(Path("/usr/local/share"))
+    _add(Path("/usr/share"))
+
+    for raw in os.environ.get("XDG_DATA_DIRS", "").split(":"):
+        raw = raw.strip()
+        if raw:
+            _add(Path(raw))
+    return dirs
+
+
+def discover_installed_app_icons() -> set[str]:
+    """
+    Descobre os nomes de ícones (`Icon=`) de todos os aplicativos instalados
+    (.desktop em sistema, usuário, Flatpak, Snap e XDG_DATA_DIRS).
+    """
+    icon_names: set[str] = set()
+    app_dirs = [base / "applications" for base in _get_xdg_data_dirs()]
+
+    for adir in app_dirs:
+        if not adir.is_dir():
+            continue
+        try:
+            desktop_files = list(adir.rglob("*.desktop"))
+        except OSError:
+            continue
+
+        for dfile in desktop_files:
+            try:
+                txt = dfile.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+
+            in_main_section = False
+            icon_val: str | None = None
+            is_hidden = False
+
+            for raw_line in txt.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    section = line[1:-1].strip()
+                    if section == "Desktop Entry":
+                        in_main_section = True
+                        continue
+                    elif in_main_section:
+                        break
+                    else:
+                        continue
+                if not in_main_section or "=" not in line:
+                    continue
+
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if k == "Hidden" and v.lower() == "true":
+                    is_hidden = True
+                    break
+                if k == "Icon" and v:
+                    icon_val = v.strip("\"' ")
+
+            if is_hidden or not icon_val:
+                continue
+            # Caminhos absolutos são carregados direto do disco e não podem ser
+            # sobrescritos via especificação de tema Freedesktop.
+            if icon_val.startswith("/"):
+                continue
+
+            lower_val = icon_val.lower()
+            for ext in (".png", ".svgz", ".svg", ".xpm"):
+                if lower_val.endswith(ext):
+                    icon_val = icon_val[: -len(ext)]
+                    break
+
+            if icon_val:
+                icon_names.add(icon_val)
+
+    return icon_names
+
+
+def _parse_icon_size_score(size_name: str) -> int | None:
+    """Pontua pastas de resolução de ícones (ignorando variantes symbolic)."""
+    low = size_name.lower()
+    if "symbolic" in low:
+        return None
+    if low == "scalable":
+        return 1000
+    m = re.match(r"^(\d+)(?:x\d+)?(?:@\d+x)?$", low)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _get_icon_search_roots() -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            roots.append(p)
+
+    _add(get_icons_base_dir())
+    _add(Path.home() / ".icons")
+    for base in _get_xdg_data_dirs():
+        _add(base / "icons")
+    return roots
+
+
+def index_system_app_icons(
+    wanted_names: set[str],
+    preferred_theme: str | None = None,
+) -> dict[str, Path]:
+    """
+    Localiza o arquivo de ícone original (.svg, .svgz, .png, .xpm) para cada nome
+    em `wanted_names`, respeitando a prioridade:
+      tema base preferido > hicolor > Adwaita > demais temas > pixmaps,
+    e preferindo sempre SVG vetorial ou a maior resolução disponível.
+    Nunca lê os slots gerados `WallpaperSync-M3-{A,B}`.
+    """
+    if not wanted_names:
+        return {}
+
+    format_prio_map = {".svg": 4, ".svgz": 3, ".png": 2, ".xpm": 1}
+    best: dict[str, tuple[tuple[int, int, int], Path]] = {}
+
+    def _consider(icon_name: str, fpath: Path, theme_prio: int, size_score: int) -> None:
+        if icon_name not in wanted_names:
+            return
+        ext = fpath.suffix.lower()
+        fmt_prio = format_prio_map.get(ext, 0)
+        if fmt_prio == 0:
+            return
+        # Evita ícones monocromáticos -symbolic ao resolver ícones coloridos de apps
+        if icon_name.endswith("-symbolic") != fpath.stem.endswith("-symbolic"):
+            return
+        try:
+            if not fpath.is_file():
+                return
+        except OSError:
+            return
+
+        score = (theme_prio, fmt_prio, size_score)
+        prev = best.get(icon_name)
+        if prev is None or score > prev[0]:
+            best[icon_name] = (score, fpath)
+
+    def _theme_priority(theme_name: str) -> int:
+        if preferred_theme and theme_name == preferred_theme:
+            return 4
+        if theme_name == "hicolor":
+            return 3
+        if theme_name in ("Adwaita", "AdwaitaLegacy", "gnome"):
+            return 2
+        return 1
+
+    for root in _get_icon_search_roots():
+        if not root.is_dir():
+            continue
+        try:
+            theme_dirs = list(root.iterdir())
+        except OSError:
+            continue
+
+        for theme_dir in theme_dirs:
+            if not theme_dir.is_dir() or theme_dir.name in ICON_SLOTS:
+                continue
+            t_prio = _theme_priority(theme_dir.name)
+            try:
+                subdirs = list(theme_dir.iterdir())
+            except OSError:
+                continue
+
+            for sub in subdirs:
+                if not sub.is_dir():
+                    continue
+                # Layout padrão: <theme>/<size>/apps/*
+                size_score = _parse_icon_size_score(sub.name)
+                if size_score is not None:
+                    apps_sub = sub / "apps"
+                    if apps_sub.is_dir():
+                        try:
+                            for entry in apps_sub.iterdir():
+                                if entry.suffix.lower() in format_prio_map:
+                                    _consider(entry.stem, entry, t_prio, size_score)
+                        except OSError:
+                            pass
+                # Layout alternativo: <theme>/apps/<size>/*
+                elif sub.name == "apps":
+                    try:
+                        for ssub in sub.iterdir():
+                            if ssub.is_dir():
+                                s_score = _parse_icon_size_score(ssub.name)
+                                if s_score is None:
+                                    continue
+                                for entry in ssub.iterdir():
+                                    if entry.suffix.lower() in format_prio_map:
+                                        _consider(entry.stem, entry, t_prio, s_score)
+                            elif ssub.suffix.lower() in format_prio_map:
+                                _consider(ssub.stem, ssub, t_prio, 128)
+                    except OSError:
+                        pass
+
+    pixmaps_dir = Path("/usr/share/pixmaps")
+    if pixmaps_dir.is_dir():
+        try:
+            for entry in pixmaps_dir.iterdir():
+                if entry.suffix.lower() in format_prio_map:
+                    _consider(entry.stem, entry, 0, 64)
+        except OSError:
+            pass
+
+    return {name: path for name, (_, path) in best.items()}
+
+
+# ==============================================================================
+# FILTRO TONAL MATERIAL DESIGN 3 PARA ÍCONES ORIGINAIS (SVG & PNG)
+# ==============================================================================
+
+_SVG_NAMED_COLORS: dict[str, tuple[int, int, int]] = {
+    "aliceblue": (240, 248, 255),
+    "antiquewhite": (250, 235, 215),
+    "aqua": (0, 255, 255),
+    "aquamarine": (127, 255, 212),
+    "azure": (240, 255, 255),
+    "beige": (245, 245, 220),
+    "black": (0, 0, 0),
+    "blue": (0, 0, 255),
+    "blueviolet": (138, 43, 226),
+    "brown": (165, 42, 42),
+    "cadetblue": (95, 158, 160),
+    "chartreuse": (127, 255, 0),
+    "chocolate": (210, 105, 30),
+    "coral": (255, 127, 80),
+    "cornflowerblue": (100, 149, 237),
+    "crimson": (220, 20, 60),
+    "cyan": (0, 255, 255),
+    "darkblue": (0, 0, 139),
+    "darkcyan": (0, 139, 139),
+    "darkgray": (169, 169, 169),
+    "darkgrey": (169, 169, 169),
+    "darkgreen": (0, 100, 0),
+    "darkmagenta": (139, 0, 139),
+    "darkorange": (255, 140, 0),
+    "darkred": (139, 0, 0),
+    "darkviolet": (148, 0, 211),
+    "deeppink": (255, 20, 147),
+    "deepskyblue": (0, 191, 255),
+    "dimgray": (105, 105, 105),
+    "dimgrey": (105, 105, 105),
+    "dodgerblue": (30, 144, 255),
+    "firebrick": (178, 34, 34),
+    "forestgreen": (34, 139, 34),
+    "fuchsia": (255, 0, 255),
+    "gainsboro": (220, 220, 220),
+    "gold": (255, 215, 0),
+    "goldenrod": (218, 165, 32),
+    "gray": (128, 128, 128),
+    "grey": (128, 128, 128),
+    "green": (0, 128, 0),
+    "greenyellow": (173, 255, 47),
+    "hotpink": (255, 105, 180),
+    "indianred": (205, 92, 92),
+    "indigo": (75, 0, 130),
+    "ivory": (255, 255, 240),
+    "khaki": (240, 230, 140),
+    "lavender": (230, 230, 250),
+    "lightblue": (173, 216, 230),
+    "lightcoral": (240, 128, 128),
+    "lightgray": (211, 211, 211),
+    "lightgrey": (211, 211, 211),
+    "lightgreen": (144, 238, 144),
+    "lightsalmon": (255, 160, 122),
+    "lightskyblue": (135, 206, 250),
+    "lime": (0, 255, 0),
+    "limegreen": (50, 205, 50),
+    "magenta": (255, 0, 255),
+    "maroon": (128, 0, 0),
+    "mediumblue": (0, 0, 205),
+    "mediumpurple": (147, 112, 219),
+    "mediumseagreen": (60, 179, 113),
+    "midnightblue": (25, 25, 112),
+    "navy": (0, 0, 128),
+    "olive": (128, 128, 0),
+    "orange": (255, 165, 0),
+    "orangered": (255, 69, 0),
+    "orchid": (218, 112, 214),
+    "palegreen": (152, 251, 152),
+    "pink": (255, 192, 203),
+    "plum": (221, 160, 221),
+    "purple": (128, 0, 128),
+    "rebeccapurple": (102, 51, 153),
+    "red": (255, 0, 0),
+    "royalblue": (65, 105, 225),
+    "salmon": (250, 128, 114),
+    "seagreen": (46, 139, 87),
+    "sienna": (160, 82, 45),
+    "silver": (192, 192, 192),
+    "skyblue": (135, 206, 235),
+    "slateblue": (106, 90, 205),
+    "slategray": (112, 128, 144),
+    "slategrey": (112, 128, 144),
+    "snow": (255, 250, 250),
+    "springgreen": (0, 255, 127),
+    "steelblue": (70, 130, 180),
+    "tan": (210, 180, 140),
+    "teal": (0, 128, 128),
+    "tomato": (255, 99, 71),
+    "turquoise": (64, 224, 208),
+    "violet": (238, 130, 238),
+    "wheat": (245, 222, 179),
+    "white": (255, 255, 255),
+    "whitesmoke": (245, 245, 245),
+    "yellow": (255, 255, 0),
+    "yellowgreen": (154, 205, 50),
+}
+
+_SVG_SKIP_COLOR_VALUES = frozenset({"none", "transparent", "currentcolor", "inherit", "context-fill", "context-stroke"})
+_SVG_COLOR_PROP_ATTR_RE = re.compile(
+    r'\b(fill|stroke|stop-color|flood-color|lighting-color|color)\s*=\s*(["\'])([^"\']*)\2',
+    re.IGNORECASE,
+)
+_SVG_STYLE_ATTR_RE = re.compile(r'(style\s*=\s*)(["\'])(.*?)(\2)', re.IGNORECASE | re.DOTALL)
+_SVG_STYLE_TAG_RE = re.compile(r'(<style\b[^>]*>)(.*?)(</style>)', re.IGNORECASE | re.DOTALL)
+_SVG_CSS_COLOR_DECL_RE = re.compile(
+    r'\b(fill|stroke|stop-color|flood-color|lighting-color|color)\s*:\s*([^;}"\']+)',
+    re.IGNORECASE,
+)
+_SVG_DATA_IMG_RE = re.compile(
+    r'(data:image/(?:png|jpeg|jpg|webp);base64,)([A-Za-z0-9+/=\s]+)',
+    re.IGNORECASE,
+)
+
+
+def _parse_rgb_component(tok: str) -> int | None:
+    tok = tok.strip()
+    if tok.endswith("%"):
+        try:
+            return max(0, min(255, int(round(float(tok[:-1]) * 2.55))))
+        except ValueError:
+            return None
+    try:
+        return max(0, min(255, int(round(float(tok)))))
+    except ValueError:
+        return None
+
+
+def _recolor_color_token(
+    raw_val: str,
+    lut_primary: list[tuple[int, int, int]],
+    lut_neutral: list[tuple[int, int, int]],
+    strength: float,
+) -> str | None:
+    """
+    Tenta converter e aplicar o filtro M3 a uma cor CSS/SVG (#hex, rgb(), rgba(), nome).
+    Retorna None caso o valor deva permanecer inalterado (ex: none, url(#...), currentColor).
+    """
+    s = raw_val.strip()
+    low = s.lower()
+    if not low or low in _SVG_SKIP_COLOR_VALUES or low.startswith(("url(", "var(")):
+        return None
+
+    # 1. Hexadecimal (#RGB, #RGBA, #RRGGBB, #RRGGBBAA)
+    if low.startswith("#"):
+        hx = low[1:]
+        if not re.fullmatch(r"[0-9a-f]{3,8}", hx):
+            return None
+        if len(hx) == 3:
+            r, g, b = (int(hx[i] * 2, 16) for i in range(3))
+            nr, ng, nb = recolor_rgb_m3(r, g, b, lut_primary, lut_neutral, strength)
+            return rgb_to_hex(nr, ng, nb)
+        if len(hx) == 4:
+            r, g, b, a = (int(hx[i] * 2, 16) for i in range(4))
+            nr, ng, nb = recolor_rgb_m3(r, g, b, lut_primary, lut_neutral, strength)
+            return f"#{nr:02x}{ng:02x}{nb:02x}{a:02x}"
+        if len(hx) == 6:
+            r, g, b = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+            nr, ng, nb = recolor_rgb_m3(r, g, b, lut_primary, lut_neutral, strength)
+            return rgb_to_hex(nr, ng, nb)
+        if len(hx) == 8:
+            r, g, b, a = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16), int(hx[6:8], 16)
+            nr, ng, nb = recolor_rgb_m3(r, g, b, lut_primary, lut_neutral, strength)
+            return f"#{nr:02x}{ng:02x}{nb:02x}{a:02x}"
+        return None
+
+    # 2. rgb(...) / rgba(...)
+    m_rgb = re.fullmatch(r"rgba?\(\s*([^)]+)\s*\)", low)
+    if m_rgb:
+        inner = m_rgb.group(1).replace("/", ",")
+        parts = [p.strip() for p in (inner.split(",") if "," in inner else inner.split()) if p.strip()]
+        if len(parts) in (3, 4):
+            r = _parse_rgb_component(parts[0])
+            g = _parse_rgb_component(parts[1])
+            b = _parse_rgb_component(parts[2])
+            if r is not None and g is not None and b is not None:
+                nr, ng, nb = recolor_rgb_m3(r, g, b, lut_primary, lut_neutral, strength)
+                if len(parts) == 4:
+                    return f"rgba({nr},{ng},{nb},{parts[3]})"
+                return rgb_to_hex(nr, ng, nb)
+        return None
+
+    # 3. Nome de cor SVG/CSS padrão
+    named = _SVG_NAMED_COLORS.get(low)
+    if named is not None:
+        nr, ng, nb = recolor_rgb_m3(named[0], named[1], named[2], lut_primary, lut_neutral, strength)
+        return rgb_to_hex(nr, ng, nb)
+
+    return None
+
+
+def recolor_pil_image(
+    img,
+    lut_primary: list[tuple[int, int, int]],
+    lut_neutral: list[tuple[int, int, int]],
+    strength: float = DEFAULT_ICON_TINT_STRENGTH,
+    max_dim: int = 256,
+):
+    """
+    Aplica o filtro tonal Material Design 3 a uma imagem PIL mantendo exatamente
+    a silhueta, o canal alpha original e a geometria do ícone.
+    """
+    from PIL import Image
+
+    rgba = img.convert("RGBA")
+    if max_dim and (rgba.width > max_dim or rgba.height > max_dim):
+        rgba.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+
+    r, g, b, a = rgba.split()
+    rgb_img = Image.merge("RGB", (r, g, b))
+    gray = rgb_img.convert("L")
+
+    p_r = [c[0] for c in lut_primary]
+    p_g = [c[1] for c in lut_primary]
+    p_b = [c[2] for c in lut_primary]
+    n_r = [c[0] for c in lut_neutral]
+    n_g = [c[1] for c in lut_neutral]
+    n_b = [c[2] for c in lut_neutral]
+
+    primary_img = Image.merge("RGB", (gray.point(p_r), gray.point(p_g), gray.point(p_b)))
+    neutral_img = Image.merge("RGB", (gray.point(n_r), gray.point(n_g), gray.point(n_b)))
+
+    hsv_s = rgb_img.convert("HSV").split()[1]
+    sat_mask = hsv_s.point(lambda x: 255 if x * 1.8 >= 255 else int(round(x * 1.8)))
+    tinted_rgb = Image.composite(primary_img, neutral_img, sat_mask)
+
+    s = max(0.0, min(1.0, float(strength)))
+    if s < 0.999:
+        final_rgb = Image.blend(rgb_img, tinted_rgb, s)
+    else:
+        final_rgb = tinted_rgb
+
+    fr, fg, fb = final_rgb.split()
+    return Image.merge("RGBA", (fr, fg, fb, a))
+
+
+def recolor_png_image(
+    src_path: Path,
+    dst_path: Path,
+    lut_primary: list[tuple[int, int, int]],
+    lut_neutral: list[tuple[int, int, int]],
+    strength: float = DEFAULT_ICON_TINT_STRENGTH,
+) -> bool:
+    """Recolore um ícone raster (PNG/XPM) salvando o resultado como PNG com alpha original."""
+    try:
+        from PIL import Image
+
+        with Image.open(src_path) as img:
+            out_img = recolor_pil_image(img, lut_primary, lut_neutral, strength=strength)
+            out_img.save(dst_path, format="PNG", optimize=False)
+        return True
+    except Exception:
+        try:
+            if src_path.suffix.lower() == ".png":
+                shutil.copy2(src_path, dst_path)
+                return True
+        except OSError:
+            pass
+        return False
+
+
+def recolor_svg_content(
+    svg_text: str,
+    lut_primary: list[tuple[int, int, int]],
+    lut_neutral: list[tuple[int, int, int]],
+    strength: float = DEFAULT_ICON_TINT_STRENGTH,
+) -> str:
+    """
+    Aplica o filtro tonal Material Design 3 diretamente nas propriedades de cor
+    de um SVG (atributos XML, style='', blocos <style> e PNGs embutidos em base64),
+    preservando 100% dos caminhos, gradientes `url(#...)`, IDs e geometria original.
+    """
+    def _replace_attr(m: re.Match) -> str:
+        prop, quote, val = m.group(1), m.group(2), m.group(3)
+        recolored = _recolor_color_token(val, lut_primary, lut_neutral, strength)
+        if recolored is None:
+            return m.group(0)
+        return f"{prop}={quote}{recolored}{quote}"
+
+    def _replace_css_decl(m: re.Match) -> str:
+        prop, raw_val = m.group(1), m.group(2)
+        important = ""
+        val_clean = raw_val.strip()
+        if val_clean.lower().endswith("!important"):
+            important = " !important"
+            val_clean = val_clean[: -len("!important")].strip()
+        recolored = _recolor_color_token(val_clean, lut_primary, lut_neutral, strength)
+        if recolored is None:
+            return m.group(0)
+        return f"{prop}:{recolored}{important}"
+
+    def _replace_data_img(m: re.Match) -> str:
+        b64_payload = re.sub(r"\s+", "", m.group(2))
+        try:
+            from PIL import Image
+
+            raw_bytes = base64.b64decode(b64_payload)
+            with Image.open(io.BytesIO(raw_bytes)) as img:
+                out_img = recolor_pil_image(img, lut_primary, lut_neutral, strength=strength, max_dim=512)
+                buf = io.BytesIO()
+                out_img.save(buf, format="PNG", optimize=False)
+                new_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            return f"data:image/png;base64,{new_b64}"
+        except Exception:
+            return m.group(0)
+
+    out = _SVG_COLOR_PROP_ATTR_RE.sub(_replace_attr, svg_text)
+    out = _SVG_STYLE_ATTR_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{_SVG_CSS_COLOR_DECL_RE.sub(_replace_css_decl, m.group(3))}{m.group(4)}",
+        out,
+    )
+    out = _SVG_STYLE_TAG_RE.sub(
+        lambda m: f"{m.group(1)}{_SVG_CSS_COLOR_DECL_RE.sub(_replace_css_decl, m.group(2))}{m.group(3)}",
+        out,
+    )
+    if "data:image/" in out.lower():
+        out = _SVG_DATA_IMG_RE.sub(_replace_data_img, out)
+    return out
 
 
 def detect_inherit_themes(is_dark: bool = True) -> list[str]:
@@ -518,11 +1090,41 @@ FULL_APP_SYMLINKS: dict[str, str] = {
 # 4. CONSTRUÇÃO DO TEMA FREEDESKTOP & HOT-RELOAD NO GNOME
 # ==============================================================================
 
-def build_index_theme(theme_name: str, inherits: list[str], include_apps: bool) -> str:
+def _resolve_preferred_base_theme(current_theme: str | None = None) -> str | None:
+    """Obtém o tema base original do usuário (antes do WallpaperSync) se disponível."""
+    if current_theme and current_theme not in ICON_SLOTS:
+        return current_theme
+    marker = get_prev_icon_theme_marker()
+    if marker.exists():
+        try:
+            saved = marker.read_text(encoding="utf-8").strip()
+            if saved and saved not in ICON_SLOTS:
+                return saved
+        except OSError:
+            pass
+    return None
+
+
+def _read_svg_source(src_path: Path) -> str:
+    """Lê texto SVG de arquivos .svg ou .svgz (com descompressão gzip)."""
+    if src_path.suffix.lower() == ".svgz":
+        with gzip.open(src_path, "rb") as gz:
+            return gz.read().decode("utf-8", errors="ignore")
+    return src_path.read_text(encoding="utf-8", errors="ignore")
+
+
+def build_index_theme(
+    theme_name: str,
+    inherits: list[str],
+    include_apps: bool = False,
+    include_png_apps: bool = False,
+) -> str:
     """Gera o conteúdo do arquivo `index.theme` no padrão Freedesktop."""
     dirs = ["scalable/places", "scalable/mimetypes"]
     if include_apps:
         dirs.append("scalable/apps")
+    if include_png_apps:
+        dirs.append("256x256/apps")
 
     lines = [
         "[Icon Theme]",
@@ -555,6 +1157,16 @@ def build_index_theme(theme_name: str, inherits: list[str], include_apps: bool) 
             "MaxSize=512",
             "Type=Scalable",
         ])
+    if include_png_apps:
+        lines.extend([
+            "",
+            "[256x256/apps]",
+            "Context=Applications",
+            "Size=256",
+            "MinSize=16",
+            "MaxSize=512",
+            "Type=Scalable",
+        ])
     return "\n".join(lines) + "\n"
 
 
@@ -563,17 +1175,23 @@ def generate_icon_theme_directory(
     scheme: dict[str, str],
     mode: str = "system",
     theme_display_name: str = "WallpaperSync Material 3",
+    preferred_base_theme: str | None = None,
+    tint_strength: float | None = None,
 ) -> int:
     """
-    Escreve a árvore completa de ícones SVG Material Design 3 em `target_dir`.
+    Escreve a árvore completa do tema de ícones Material Design 3 em `target_dir`.
+    - `places`: pastas e mimetypes em SVG M3.
+    - `system` / `full`: pastas/mimetypes em M3 + ícones originais de todos os apps
+      instalados recoloridos com filtro tonal M3 mantendo formato e geometria intactos.
+    - `squircle`: pastas/mimetypes + ícones uniformes em squircle Material You.
     Retorna a quantidade de ícones/symlinks criados.
     """
     if mode not in VALID_ICON_MODES or mode == "off":
         return 0
 
-    include_apps = mode in ("system", "full")
     is_dark = scheme.get("mode", "dark") == "dark"
     inherits = detect_inherit_themes(is_dark=is_dark)
+    strength = get_icon_tint_strength() if tint_strength is None else max(0.0, min(1.0, float(tint_strength)))
 
     # Limpa e recria diretório do slot alvo para evitar órfãos ao mudar de modo
     if target_dir.exists():
@@ -619,15 +1237,48 @@ def generate_icon_theme_directory(
             link_path.symlink_to(f"{target}.svg")
             count += 1
 
-    # 3. Apps (system / full)
-    if include_apps:
+    # 3. Apps
+    has_svg_apps = False
+    has_png_apps = False
+
+    if mode in ("system", "full"):
+        wanted_apps = discover_installed_app_icons()
+        resolved_pref = preferred_base_theme or _resolve_preferred_base_theme()
+        app_icon_map = index_system_app_icons(wanted_apps, preferred_theme=resolved_pref)
+
+        if app_icon_map:
+            lut_primary, lut_neutral = build_icon_tint_luts(scheme["seed"])
+            apps_svg_dir = target_dir / "scalable" / "apps"
+            apps_png_dir = target_dir / "256x256" / "apps"
+
+            for icon_name in sorted(app_icon_map):
+                src_path = app_icon_map[icon_name]
+                ext = src_path.suffix.lower()
+                if ext in (".svg", ".svgz"):
+                    try:
+                        raw_svg = _read_svg_source(src_path)
+                        if not raw_svg.strip():
+                            continue
+                        tinted_svg = recolor_svg_content(raw_svg, lut_primary, lut_neutral, strength=strength)
+                        apps_svg_dir.mkdir(parents=True, exist_ok=True)
+                        (apps_svg_dir / f"{icon_name}.svg").write_text(tinted_svg, encoding="utf-8")
+                        has_svg_apps = True
+                        count += 1
+                    except Exception:
+                        continue
+                else:
+                    apps_png_dir.mkdir(parents=True, exist_ok=True)
+                    dst_png = apps_png_dir / f"{icon_name}.png"
+                    if recolor_png_image(src_path, dst_png, lut_primary, lut_neutral, strength=strength):
+                        has_png_apps = True
+                        count += 1
+
+    elif mode == "squircle":
         apps_dir = target_dir / "scalable" / "apps"
         apps_dir.mkdir(parents=True, exist_ok=True)
-        specs = FULL_APP_SPECS if mode == "full" else SYSTEM_APP_SPECS
-        aliases = FULL_APP_SYMLINKS if mode == "full" else SYSTEM_APP_SYMLINKS
+        has_svg_apps = True
 
-        for icon_name, (glyph, role) in specs.items():
-            # Org.gnome.Nautilus recebe o visual de pasta M3 + badge para combinar 100%
+        for icon_name, (glyph, role) in FULL_APP_SPECS.items():
             if icon_name == "org.gnome.Nautilus":
                 svg = render_folder_svg(scheme, glyph_name="home", is_open=False)
             else:
@@ -635,14 +1286,19 @@ def generate_icon_theme_directory(
             (apps_dir / f"{icon_name}.svg").write_text(svg, encoding="utf-8")
             count += 1
 
-        for alias, target in aliases.items():
+        for alias, target in FULL_APP_SYMLINKS.items():
             link_path = apps_dir / f"{alias}.svg"
             if not link_path.exists():
                 link_path.symlink_to(f"{target}.svg")
                 count += 1
 
     # 4. index.theme e cache GTK
-    index_content = build_index_theme(theme_display_name, inherits, include_apps=include_apps)
+    index_content = build_index_theme(
+        theme_display_name,
+        inherits,
+        include_apps=has_svg_apps,
+        include_png_apps=has_png_apps,
+    )
     (target_dir / "index.theme").write_text(index_content, encoding="utf-8")
 
     cache_bin = shutil.which("gtk-update-icon-cache") or shutil.which("gtk4-update-icon-cache")
@@ -661,6 +1317,7 @@ def sync_m3_icon_pack(
     mode: str = "system",
     gsettings_get_fn=None,
     gsettings_set_fn=None,
+    tint_strength: float | None = None,
 ) -> tuple[bool, dict[str, str], str | None]:
     """
     Gera o pacote de ícones Material Design 3 no slot inativo (A <-> B) e ativa-o
@@ -687,6 +1344,7 @@ def sync_m3_icon_pack(
         except OSError:
             pass
 
+    preferred_base_theme = _resolve_preferred_base_theme(current_theme)
     next_slot = ICON_SLOT_B if current_theme == ICON_SLOT_A else ICON_SLOT_A
     slot_dir = icons_base / next_slot
 
@@ -695,6 +1353,8 @@ def sync_m3_icon_pack(
         scheme=scheme,
         mode=mode,
         theme_display_name="WallpaperSync Material 3",
+        preferred_base_theme=preferred_base_theme,
+        tint_strength=tint_strength,
     )
 
     if generated_count <= 0:
@@ -746,7 +1406,12 @@ def uninstall_m3_icon_pack(gsettings_get_fn=None, gsettings_set_fn=None) -> list
     return removed
 
 
-def render_html_preview(scheme: dict[str, str], mode: str = "system") -> str:
+def render_html_preview(
+    scheme: dict[str, str],
+    mode: str = "system",
+    max_apps: int = 36,
+    tint_strength: float | None = None,
+) -> str:
     """Gera uma página HTML autônoma para pré-visualizar a paleta e todos os ícones M3."""
     cards_places = []
     for name, (glyph, is_open) in FOLDER_SPECS.items():
@@ -761,14 +1426,41 @@ def render_html_preview(scheme: dict[str, str], mode: str = "system") -> str:
         cards_mimes.append(f'<div class="card">{svg}<span>{name}</span></div>')
 
     cards_apps = []
-    app_specs = FULL_APP_SPECS if mode == "full" else SYSTEM_APP_SPECS
-    for name, (glyph, role) in app_specs.items():
-        svg = (
-            render_folder_svg(scheme, glyph_name="home", is_open=False)
-            if name == "org.gnome.Nautilus"
-            else render_app_squircle_svg(scheme, glyph_name=glyph, role=role)
-        )
-        cards_apps.append(f'<div class="card">{svg}<span>{name}</span></div>')
+    if mode == "squircle":
+        for name, (glyph, role) in FULL_APP_SPECS.items():
+            svg = (
+                render_folder_svg(scheme, glyph_name="home", is_open=False)
+                if name == "org.gnome.Nautilus"
+                else render_app_squircle_svg(scheme, glyph_name=glyph, role=role)
+            )
+            cards_apps.append(f'<div class="card">{svg}<span>{name}</span></div>')
+    elif mode in ("system", "full"):
+        strength = get_icon_tint_strength() if tint_strength is None else max(0.0, min(1.0, float(tint_strength)))
+        wanted = discover_installed_app_icons()
+        app_map = index_system_app_icons(wanted, preferred_theme=_resolve_preferred_base_theme())
+        if app_map:
+            lut_primary, lut_neutral = build_icon_tint_luts(scheme["seed"])
+            for name in sorted(app_map)[:max_apps]:
+                src_path = app_map[name]
+                if src_path.suffix.lower() in (".svg", ".svgz"):
+                    try:
+                        tinted = recolor_svg_content(_read_svg_source(src_path), lut_primary, lut_neutral, strength=strength)
+                        b64 = base64.b64encode(tinted.encode("utf-8")).decode("ascii")
+                        cards_apps.append(f'<div class="card"><img src="data:image/svg+xml;base64,{b64}" alt="{name}"><span>{name}</span></div>')
+                    except Exception:
+                        continue
+                else:
+                    try:
+                        from PIL import Image
+
+                        with Image.open(src_path) as img:
+                            out_img = recolor_pil_image(img, lut_primary, lut_neutral, strength=strength, max_dim=128)
+                            buf = io.BytesIO()
+                            out_img.save(buf, format="PNG", optimize=False)
+                            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                        cards_apps.append(f'<div class="card"><img src="data:image/png;base64,{b64}" alt="{name}"><span>{name}</span></div>')
+                    except Exception:
+                        continue
 
     swatch_keys = [
         "primary", "onPrimary", "primaryContainer", "onPrimaryContainer",
@@ -779,6 +1471,12 @@ def render_html_preview(scheme: dict[str, str], mode: str = "system") -> str:
         f'<div class="swatch"><div class="dot" style="background:{scheme[k]}"></div>'
         f'<div><b>{k}</b><br><code>{scheme[k]}</code></div></div>'
         for k in swatch_keys
+    )
+
+    apps_section = (
+        f'<div class="grid">{"".join(cards_apps)}</div>'
+        if cards_apps
+        else '<p class="meta">Nenhum ícone de aplicativo .desktop encontrado neste ambiente.</p>'
     )
 
     return f"""<!DOCTYPE html>
@@ -818,12 +1516,12 @@ def render_html_preview(scheme: dict[str, str], mode: str = "system") -> str:
     text-align: center; font-size: 11px; color: {scheme["onSurfaceVariant"]};
     word-break: break-word;
   }}
-  .card svg {{ width: 56px; height: 56px; }}
+  .card svg, .card img {{ width: 56px; height: 56px; object-fit: contain; }}
 </style>
 </head>
 <body>
   <h1>WallpaperSync Material Design 3 Icons</h1>
-  <p class="meta">Seed: <code>{scheme["seed"]}</code> · Mode: <code>{scheme["mode"]}</code> · Hue: <code>{scheme["hue"]}°</code></p>
+  <p class="meta">Seed: <code>{scheme["seed"]}</code> · Mode: <code>{scheme["mode"]}</code> · Hue: <code>{scheme["hue"]}°</code> · Icon Mode: <code>{mode}</code></p>
   <h2>Paleta Tonal Material Design 3</h2>
   <div class="swatches">{swatches_html}</div>
   <h2>Places &amp; Pastas ({len(cards_places)})</h2>
@@ -831,7 +1529,7 @@ def render_html_preview(scheme: dict[str, str], mode: str = "system") -> str:
   <h2>Mimetypes ({len(cards_mimes)})</h2>
   <div class="grid">{''.join(cards_mimes)}</div>
   <h2>Aplicativos ({len(cards_apps)})</h2>
-  <div class="grid">{''.join(cards_apps)}</div>
+  {apps_section}
 </body>
 </html>
 """

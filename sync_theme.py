@@ -2086,7 +2086,13 @@ def main():
         "--icon-mode",
         choices=VALID_ICON_MODES,
         default=None,
-        help="Modo do pacote de ícones M3: system (padrão), full, places ou off.",
+        help="Modo do pacote de ícones M3: system/full (padrão: pastas M3 + apps originais com filtro M3), places, squircle ou off.",
+    )
+    parser.add_argument(
+        "--icon-tint",
+        type=float,
+        default=None,
+        help="Força do filtro de cor Material Design 3 nos ícones originais de apps (0.0 a 1.0, padrão: 0.90).",
     )
     parser.add_argument(
         "--no-icons",
@@ -2121,6 +2127,8 @@ def main():
     resolved_icon_mode = "off" if args.no_icons else args.icon_mode
     if resolved_icon_mode:
         os.environ["WALLPAPERSYNC_ICON_MODE"] = resolved_icon_mode
+    if args.icon_tint is not None:
+        os.environ["WALLPAPERSYNC_ICON_TINT"] = str(max(0.0, min(1.0, args.icon_tint)))
 
     if args.uninstall:
         uninstall_all()
