@@ -1,21 +1,23 @@
-# WallpaperSync — Documentação Técnica e Arquitetura
+# WallpaperSync
 
-Este documento serve como referência completa para desenvolvedores, mantenedores ou inteligências artificiais (LLMs) que venham a assumir o suporte e a evolução deste ecossistema.
+Sincronizador dinâmico de temas e pacote de ícones **Material Design 3** para desktop Linux (GNOME), extraindo a paleta de cores diretamente do papel de parede ativo.
 
 ---
 
-## 1. Visão Geral do Projeto
+## 1. Visão Geral
 
-O **WallpaperSync** é uma suíte de automação desenvolvida para extrair a paleta de cores dinâmica **diretamente do papel de parede ativo** do ambiente de desktop (GNOME, GSettings ou arquivo local) e sincronizá-la com aplicativos e ferramentas do sistema operacional:
+O **WallpaperSync** detecta o papel de parede ativo (via GSettings/GNOME, XML de slideshow ou arquivo local), extrai a cor de destaque dominante com quantização adaptativa e gera tokens tonais **Material Design 3 (CAM16 / HCT)** para sincronizar automaticamente:
 
-- **Prompt do Terminal** (`starship.toml`);
-- **Emulador de Terminal GNOME** (`Ptyxis`);
-- **Navegador Web Firefox** (estilização dinâmica de abas horizontais e verticais, barra de URL e navegação via `userChrome.css`);
-- **Ambiente GNOME Desktop** (sincronização automática da chave nativa `accent-color` no GNOME 47+);
-- **Pacote de Ícones Material Design 3** (geração dinâmica de SVGs para pastas e mimetypes + filtro tonal M3 preservando o formato original de todos os aplicativos em `~/.local/share/icons/WallpaperSync-M3-{A,B}`).
+- **Pacote de Ícones Dinâmico Material Design 3** (`WallpaperSync-M3-A` / `WallpaperSync-M3-B`):
+  - Pastas (`places/`) e tipos de arquivo (`mimetypes/`) em SVG seguindo os tokens tonais M3.
+  - Filtro tonal M3 aplicado aos ícones originais de **todos os aplicativos instalados** (`.desktop` de sistema, usuário, Flatpak, Snap e **AppImage**), preservando 100% da silhueta, transparência e geometria original.
+- **Prompt do Terminal (`Starship`)** (`~/.config/starship.toml`).
+- **Emulador de Terminal GNOME (`Ptyxis`)** (`wallpapersync.palette` + atualização via GSettings).
+- **Navegador Web `Firefox`** (`userChrome.css` e `user.js` em todos os perfis ativos, com suporte a abas horizontais e verticais).
+- **Cor de Destaque Nativa do GNOME 47+** (`org.gnome.desktop.interface accent-color`).
 
 > [!NOTE]
-> **Independência de Extensões**: O projeto não depende mais da extensão ChromaLeon nem de arquivos intermediários GTK (`custom-accent.css`). Toda a extração e cálculo de cores é realizada nativamente em Python via análise de imagem (Pillow), quantização adaptativa tonal e motor HCT do Material Design 3 (`m3_palette.py`).
+> **Sem dependências de extensões externas**: toda a extração de cores e o cálculo da paleta Material Design 3 são executados nativamente em Python por [sync_theme.py](sync_theme.py), [m3_palette.py](m3_palette.py) e [m3_icons.py](m3_icons.py).
 
 ---
 
@@ -24,187 +26,200 @@ O **WallpaperSync** é uma suíte de automação desenvolvida para extrair a pal
 ```mermaid
 flowchart TD
     A[GNOME Desktop: Troca de Papel de Parede] -->|GSettings picture-uri / picture-uri-dark| D[WallpaperSync: sync_theme.py]
-    A2[Arquivo de Imagem Local / Alteração de Imagem] -->|Gio.FileMonitor / inotify| D
-    
-    subgraph D-Bus & Suspensão
+    A2[Arquivo de Imagem Local] -->|Gio.FileMonitor / inotify| D
+
+    subgraph D-Bus e Suspensão
         S1[systemd-logind: PrepareForSleep false] --> D
         S2[ScreenSaver: ActiveChanged false] --> D
-        S3[Timer Monotônico: Clock Jump > 5s] --> D
+        S3[Timer Monotônico: Salto > 5s] --> D
     end
 
-    subgraph Extração de Cores Material You
-        D --> E1[Pillow / Quantização Adaptativa MedianCut]
-        E1 --> E2[Fórmula M3 + Motor HCT m3_palette.py]
-        E2 --> E3[Cores de Destaque, Tokens M3 e Superfícies Tinted]
+    subgraph Extração e Motor Material Design 3
+        D --> E1[Pillow / Quantização MedianCut ou SVG]
+        E1 --> E2[Motor CAM16 / HCT: m3_palette.py]
+        E2 --> E3[Tokens M3, Accent e Superfícies Tinted]
     end
 
-    E3 -->|1. starship.toml| F2[Starship Prompt]
-    E3 -->|2. wallpapersync.palette| F3[Ptyxis Terminal]
-    E3 -->|3. userChrome.css| F4[Navegador Firefox]
-    E3 -->|4. accent-color| F5[GNOME 47+ Native Accent]
-    E3 -->|5. m3_icons.py| F6[Pacote de Ícones M3 A/B]
+    E3 -->|1. starship.toml| F1[Starship Prompt]
+    E3 -->|2. wallpapersync.palette| F2[Ptyxis Terminal]
+    E3 -->|3. userChrome.css + user.js| F3[Firefox]
+    E3 -->|4. accent-color| F4[GNOME 47+ Native Accent]
+    E3 -->|5. m3_icons.py| F5[Ícones M3 Slots A/B]
 ```
 
 ---
 
-## 3. Componentes e Lógica de Implementação
+## 3. Requisitos e Instalação
 
-### 3.1. Núcleo: `sync_theme.py`
-O script central executa as seguintes etapas:
+### Dependências
+
+- **Python 3.10+**
+- **Pillow (`PIL`)**: extração de cores do wallpaper e filtro tonal M3 em ícones raster (`.png`, `.webp`, `.jpg`, `.ico` e PNGs embutidos em SVG).
+  ```bash
+  sudo apt install python3-pil
+  # ou via pip: pip install pillow
+  ```
+- **PyGObject (`python3-gi`)** *(recomendado para `--watch`)*: monitoramento em tempo real via GSettings, `Gio.FileMonitor` e sinais D-Bus de suspensão/desbloqueio.
+  ```bash
+  sudo apt install python3-gi gir1.2-gio-2.0
+  ```
+- **Ferramentas do ambiente** *(opcionais, conforme os apps que você utiliza)*: `gsettings` (GNOME), `starship`, `Ptyxis`, `Firefox`.
+
+### Instalação Rápida
+
+```bash
+git clone https://github.com/PedroMachado1/WallpaperSync.git
+cd WallpaperSync
+
+# Teste uma sincronização única
+python3 sync_theme.py
+
+# Instale e habilite o serviço automático de sessão (systemd --user)
+python3 sync_theme.py --install-service
+systemctl --user daemon-reload
+systemctl --user enable --now wallpapersync.service
+```
+
+> `--install-service` gera automaticamente `~/.config/systemd/user/wallpapersync.service` apontando para o interpretador Python atual e para o caminho real onde o repositório foi clonado.
+
+---
+
+## 4. Detalhes dos Módulos e Integrações
+
+### 4.1. Núcleo (`sync_theme.py`)
+
 1. **Detecção do Papel de Parede (`get_current_wallpaper_path`)**:
-   - Detecta o esquema de cores ativo (`org.gnome.desktop.interface color-scheme`).
-   - Busca `picture-uri-dark` (no modo escuro) ou `picture-uri` no schema `org.gnome.desktop.background`.
-   - Converte URIs `file://` para caminhos de sistema de arquivos e decodifica caracteres especiais.
-   - Suporta arquivos `.xml` de slideshows do GNOME e fallbacks como `~/.fehbg` ou diretórios de papéis de parede comuns.
+   - Lê `org.gnome.desktop.interface color-scheme` e consulta `picture-uri-dark` ou `picture-uri` em `org.gnome.desktop.background`.
+   - Converte URIs `file://`, decodifica caracteres especiais, resolve slideshows `.xml` do GNOME e possui fallbacks (`~/.fehbg` e diretórios padrão de wallpapers).
 2. **Extração e Matemática de Cores (`extract_wallpaper_colors`)**:
-   - Redimensiona a imagem para análise sub-20ms.
-   - Aplica quantização adaptativa de 24 cores (MedianCut).
-   - Avalia cada cor candidata através de pontuação de contraste e vivacidade para temas escuros:
+   - Redimensiona a imagem para processamento rápido e aplica quantização adaptativa de 24 cores (`MedianCut`).
+   - Pontua cores candidatas equilibrando população, saturação e luminosidade:
      $$\text{Score} = \text{População}^{0.55} \times \text{Saturação}^{1.4} \times \text{FatorLuminosidade}$$
-   - Calcula automaticamente o *tint intensity* (8% a 14%) com base na saturação média do wallpaper.
-   - Suporta papéis de parede vetoriais em `.svg` (análise de gradientes e paradas de cor).
-3. **Distribuição**:
-   - Atualiza os arquivos no diretório do projeto e propaga para os destinos mapeados no sistema.
+   - Calcula automaticamente o *tint intensity* (`0.08` a `0.14`) conforme a saturação média do wallpaper e também suporta papéis de parede vetoriais em `.svg`.
+3. **Cache de Estado (`$XDG_RUNTIME_DIR/wallpapersync.state`)**:
+   - Evita reprocessamento redundante quando wallpaper, esquema de cores, modo de ícones e `--icon-tint` não mudaram (a menos que `--force` seja usado).
 
----
+### 4.2. Pacote de Ícones Dinâmico Material Design 3 (`m3_palette.py` & `m3_icons.py`)
 
-### 3.2. Prompt Starship & Terminal Ptyxis
-
-1. **Starship (`~/.config/starship.toml`)**:
-   - `sync_theme.py` atualiza a seção `[palettes.wallpapersync]` (e mantém `[palettes.chromaleon]` para retrocompatibilidade) e define `palette = 'wallpapersync'`, injetando a cor primária, variações e fundos tingidos nos componentes do prompt.
-2. **Ptyxis (`~/.local/share/org.gnome.Ptyxis/palettes/`)**:
-   - Gera as paletas `wallpapersync.palette` e `chromaleon.palette` com `Primary=true` utilizando o tom do wallpaper como cor de fundo da janela, barra de títulos e cursor.
-   - Seta via GSettings (`org.gnome.Ptyxis.Profile`) a paleta padrão e todos os perfis cadastrados (`profile-uuids`) com o ID `wallpapersync`.
-
----
-
-### 3.3. Navegador Web Firefox (`userChrome.css` & `user.js`)
-
-1. **Descoberta de Perfis**:
-   - Varre automaticamente `~/.config/mozilla/firefox/` e `~/.mozilla/firefox/`, analisando o `profiles.ini` para localizar perfis ativos.
-2. **Ativação Automática de Estilos (`user.js`)**:
-   - Garante a injeção da preferência `toolkit.legacyUserProfileCustomizations.stylesheets = true;` no arquivo `user.js` de cada perfil.
-3. **Estilização Dinâmica (`userChrome.css`)**:
-   - Injeta as cores da paleta Material You nas variáveis nativas do Firefox.
-   - Fornece suporte tanto para o layout tradicional de **abas horizontais** quanto para o modo de **abas verticais** (*Vertical Tabs*), colorindo abas ativas, bordas de foco da barra de URL e botões em hover.
-
----
-
-### 3.4. Pacote de Ícones Dinâmico Material Design 3 (`m3_palette.py` & `m3_icons.py`)
-
-1. **Motor de Cores HCT (`m3_palette.py`)**:
-   - Implementação em Python puro do modelo CAM16 / HCT do Material Design 3 (`SchemeTonalSpot`), derivando paletas tonais (`primary`, `secondary`, `tertiary`, `error`, `surfaceContainer*`, `outlineVariant`) para modos **Dark** e **Light** com contraste WCAG verificado.
-   - Gera também tabelas LUT perceptuais (`build_icon_tint_luts`) para mapear ícones existentes para a matiz do papel de parede mantendo luminância, sombras e brancos/pretos legíveis.
-2. **Pastas, Mimetypes e Filtro Tonal para Todos os Apps (`m3_icons.py`)**:
-   - Gera ícones vetoriais M3 em `~/.local/share/icons/WallpaperSync-M3-{A,B}/scalable/` para pastas (`places/`) e tipos de arquivo (`mimetypes/`).
-   - Descobre todos os aplicativos instalados (`.desktop` em sistema, usuário, Flatpak, Snap, AppImage e `XDG_DATA_DIRS`), localiza o ícone original de cada app (`.svg`, `.svgz`, `.png`, `.webp`, `.jpg`, `.ico`) e aplica o **filtro tonal M3 mantendo 100% do formato, silhueta, transparência e geometria original** em `scalable/apps/` e `256x256/apps/`.
-   - Monta automaticamente a cadeia `Inherits=` no `index.theme` priorizando temas instalados no sistema (`MoreWaita`, `Papirus-Dark`/`Papirus`, `Adwaita`, `hicolor`).
-3. **Modos de Ícones (`--icon-mode` ou `WALLPAPERSYNC_ICON_MODE`)**:
-   - `system` / `full` *(padrão)*: pastas e mimetypes em M3 + **todos os apps instalados** com filtro de cor Material Design 3 sobre seus ícones originais. A intensidade do filtro pode ser ajustada com `--icon-tint` (ou `WALLPAPERSYNC_ICON_TINT`, padrão `0.90`).
-   - `places`: apenas pastas, locais e mimetypes.
-   - `squircle`: estilo opcional com squircles uniformes Material You para apps principais.
+1. **Motor CAM16 / HCT (`m3_palette.py`)**:
+   - Implementação em Python puro de `SchemeTonalSpot` (Material Design 3), derivando tokens para **Dark** e **Light** (`primary`, `secondary`, `tertiary`, `error`, `surfaceContainer*`, `outlineVariant`) com contraste WCAG verificado.
+   - Gera tabelas de consulta perceptuais (`build_icon_tint_luts`) para mapear ícones originais para a paleta do wallpaper mantendo luzes, sombras, brancos e contraste.
+2. **Pastas, Mimetypes e Filtro Tonal em Todos os Apps (`m3_icons.py`)**:
+   - Cria os ícones M3 em `~/.local/share/icons/WallpaperSync-M3-{A,B}/scalable/` para `places/` e `mimetypes/`.
+   - Varre todos os `.desktop` instalados (sistema, usuário, Flatpak, Snap, **AppImage** e `XDG_DATA_DIRS`) e busca seus ícones em temas instalados, diretórios `pixmaps/` e ícones soltos em `~/.local/share/icons/` ou `~/.icons/`.
+   - Aplica o filtro tonal M3 sobre `.svg`, `.svgz`, `.png`, `.webp`, `.jpg` e `.ico` sem alterar formato, contorno, transparência ou geometria original.
+   - Constrói a cadeia `Inherits=` no `index.theme` priorizando temas locais existentes (`MoreWaita`, `Papirus-Dark`/`Papirus`, `Adwaita`, `hicolor`).
+3. **Ponte Reversível para AppImages (`.desktop` com caminho absoluto)**:
+   - Aplicativos AppImage costumam definir `Icon=/caminho/absoluto/...` no `.desktop` do usuário (`~/.local/share/applications/`), o que faz o GNOME ignorar o tema de ícones ativo.
+   - O WallpaperSync copia o ícone original para `hicolor`, registra o valor original em `~/.local/share/icons/.wallpapersync_desktop_icons.json` e troca `Icon=` para um nome de ícone temável.
+   - Ao executar `--uninstall`, todos os `.desktop` modificados são restaurados exatamente para o valor original.
+4. **Modos de Ícones (`--icon-mode` / `WALLPAPERSYNC_ICON_MODE`)**:
+   - `system` ou `full` *(padrão)*: pastas e mimetypes M3 + **todos os aplicativos instalados** com filtro tonal M3 sobre os ícones originais (intensidade ajustável via `--icon-tint`, padrão `0.90`).
+   - `places`: apenas pastas, locais e mimetypes M3.
+   - `squircle`: estilo opcional com squircles Material You padronizados para apps principais.
    - `off`: desativa a geração de ícones.
-4. **Hot-Reload Atômico no GNOME**:
-   - Alterna automaticamente entre dois slots (`WallpaperSync-M3-A` ↔ `WallpaperSync-M3-B`) via `gsettings`, forçando o Nautilus e o GNOME Shell a recarregarem os ícones instantaneamente sem reiniciar a sessão. O tema original do usuário é salvo para restauração no `--uninstall`.
+5. **Hot-Reload Atômico no GNOME**:
+   - Alterna entre os dois slots `WallpaperSync-M3-A` ↔ `WallpaperSync-M3-B` via `gsettings`, forçando GNOME Shell e Nautilus a recarregar os ícones na hora. O tema anterior é salvo em `.wallpapersync_prev_icon_theme` para restauração no `--uninstall`.
+
+### 4.3. Starship, Ptyxis, Firefox e GNOME Accent
+
+- **Starship (`~/.config/starship.toml`)**: atualiza `[palettes.wallpapersync]` (e mantém `[palettes.chromaleon]` por compatibilidade) com `palette = 'wallpapersync'`.
+- **Ptyxis (`~/.local/share/org.gnome.Ptyxis/palettes/`)**: gera `wallpapersync.palette` (além de caminhos Flatpak se presentes) e configura todos os perfis via GSettings (`org.gnome.Ptyxis.Profile`).
+- **Firefox**: localiza perfis em `~/.config/mozilla/firefox/` e `~/.mozilla/firefox/` via `profiles.ini`, ativa `toolkit.legacyUserProfileCustomizations.stylesheets = true;` em `user.js` e grava `chrome/userChrome.css` com suporte a abas horizontais, barra lateral e abas verticais.
+- **GNOME 47+**: mapeia a cor de destaque extraída para a chave nativa `accent-color` em `org.gnome.desktop.interface`.
+
+### 4.4. Automação em Tempo Real (`--watch`)
+
+- **GSettings + `Gio.FileMonitor`**: reage imediatamente à troca de papel de parede, alteração de `color-scheme` (claro/escuro) ou sobrescrita do arquivo da imagem.
+- **Retorno de Suspensão e Desbloqueio (3 camadas)**:
+  1. D-Bus do sistema (`org.freedesktop.login1.Manager.PrepareForSleep` = `false`);
+  2. D-Bus da sessão (`org.gnome.ScreenSaver` / `org.freedesktop.ScreenSaver` `ActiveChanged` = `false`);
+  3. Fallback por salto monotônico (`time.monotonic()` > 5s entre ciclos).
 
 ---
 
-## 4. Automação e Ciclo de Vida (systemd & D-Bus)
-
-### 4.1. Serviço do Usuário
-O serviço roda sob a sessão do systemd do usuário:
-- **Arquivo**: `~/.config/systemd/user/wallpapersync.service`
-- **Comando executado**: `python3 -u /home/pedro/Imagens/Wallpapers/WallpaperSync/sync_theme.py --watch`
-
-### 4.2. Detecção de Mudança de Wallpaper em Tempo Real
-- **GSettings**: O script conecta sinais de monitoramento direto nas chaves `picture-uri` e `picture-uri-dark` (`org.gnome.desktop.background`) e `color-scheme` (`org.gnome.desktop.interface`).
-- **File Monitor**: Cria um `Gio.FileMonitor` diretamente no arquivo de imagem do wallpaper ativo. Se uma ferramenta externa ou script sobrescrever a imagem, a atualização é acionada instantaneamente.
-
-### 4.3. Retorno de Suspensão (Sleep / Wakeup / Lockscreen)
-- **3 Camadas de Detecção**:
-  1. **D-Bus do Sistema (`systemd-logind`)**: Escuta o sinal `org.freedesktop.login1.Manager.PrepareForSleep`. Quando o booleano for `false` (acordando), aciona a sincronização.
-  2. **D-Bus da Sessão (`ScreenSaver`)**: Escuta `ActiveChanged` de `org.gnome.ScreenSaver` e `org.freedesktop.ScreenSaver`. Quando o valor for `false` (tela desbloqueada), aciona a sincronização.
-  3. **Salto Temporal (Fallback)**: Um timer de 1 segundo compara `time.monotonic()`. Se a diferença entre dois ciclos for maior que 5 segundos, a máquina comprovadamente esteve suspensa e acabou de retomar.
-
----
-
-## 5. Mapeamento de Arquivos e Diretórios
+## 5. Arquivos do Projeto e Destinos no Sistema
 
 | Arquivo / Caminho | Origem / Destino | Função |
 |---|---|---|
-| `/home/pedro/Imagens/Wallpapers/WallpaperSync/sync_theme.py` | Código-fonte principal | Daemon de monitoramento, conversão de cores e controle D-Bus |
-| `/home/pedro/Imagens/Wallpapers/WallpaperSync/m3_palette.py` | Módulo M3 | Motor de cores CAM16 / HCT e tokens tonais Material Design 3 |
-| `/home/pedro/Imagens/Wallpapers/WallpaperSync/m3_icons.py` | Módulo M3 Icons | Gerador de SVGs Freedesktop, filtro tonal M3 e hot-reloader de slots no GNOME |
-| `/home/pedro/Imagens/Wallpapers/WallpaperSync/firefox-userChrome.css` | Gerado por `sync_theme.py` | Cópia local de referência do tema do Firefox |
-| `~/.local/share/icons/WallpaperSync-M3-{A,B}/` | Gerado por `m3_icons.py` | Slots alternados do pacote de ícones dinâmico Material Design 3 |
-| `~/.config/systemd/user/wallpapersync.service` | Serviço systemd | Autostart do monitoramento no login do usuário |
-| `~/.config/starship.toml` | Arquivo do sistema | Configuração do prompt do shell |
-| `~/.local/share/org.gnome.Ptyxis/palettes/wallpapersync.palette` | Paleta gerada | Paleta dinâmica para o terminal Ptyxis |
-| `~/.config/mozilla/firefox/<perfil>/chrome/userChrome.css` | Arquivo gerado | Estilos dinâmicos de interface para o Firefox |
-| `~/.config/mozilla/firefox/<perfil>/user.js` | Arquivo de preferências | Ativa a leitura do `userChrome.css` no Firefox |
+| `sync_theme.py` | Repositório | Orquestrador principal, extração de cores, CLI, daemon e D-Bus |
+| `m3_palette.py` | Repositório | Motor CAM16 / HCT Material Design 3 e geração de LUTs de tint |
+| `m3_icons.py` | Repositório | Gerador SVG M3, filtro tonal em apps/AppImages e hot-reload de slots |
+| `wallpapersync.service` | Repositório | Modelo de referência da unit systemd do usuário |
+| `firefox-userChrome.css` | Gerado localmente | Cópia de referência do `userChrome.css` gerado |
+| `tests/test_m3_icons.py` | Repositório | Suíte de testes unitários para HCT, recoloração, bridge e slots |
+| `~/.local/share/icons/WallpaperSync-M3-{A,B}/` | Gerado por `m3_icons.py` | Slots alternados do tema de ícones Material Design 3 |
+| `~/.local/share/icons/.wallpapersync_prev_icon_theme` | Gerado por `m3_icons.py` | Backup do tema de ícones original do usuário |
+| `~/.local/share/icons/.wallpapersync_desktop_icons.json` | Gerado por `m3_icons.py` | Mapa de restauração de `.desktop` (ex.: AppImages) |
+| `~/.config/systemd/user/wallpapersync.service` | Gerado por `--install-service` | Serviço systemd do usuário para `--watch` |
+| `~/.config/starship.toml` | Sistema | Paleta dinâmica aplicada ao prompt Starship |
+| `~/.local/share/org.gnome.Ptyxis/palettes/wallpapersync.palette` | Sistema / Flatpak | Paleta dinâmica do terminal Ptyxis |
+| `~/.config/mozilla/firefox/<perfil>/chrome/userChrome.css` | Sistema | Estilos dinâmicos aplicados ao Firefox |
+| `~/.config/mozilla/firefox/<perfil>/user.js` | Sistema | Habilita carregamento do `userChrome.css` |
 
 ---
 
-## 6. Guia de Operação e Linha de Comando (CLI)
+## 6. Guia de Linha de Comando (CLI) e Variáveis de Ambiente
 
-### Comandos Rápidos
+### Variáveis de Ambiente
 
-- **Executar sincronização única (utilizando o wallpaper ativo atual)**:
-  ```bash
-  python3 sync_theme.py
-  ```
+| Variável | Valores | Padrão | Descrição |
+|---|---|---|---|
+| `WALLPAPERSYNC_ICON_MODE` | `system`, `full`, `places`, `squircle`, `off` | `system` | Define o modo padrão do gerador de ícones M3 |
+| `WALLPAPERSYNC_ICON_TINT` | `0.0` a `1.0` | `0.90` | Define a intensidade padrão do filtro tonal M3 nos ícones de apps |
 
-- **Escolher o modo do pacote de ícones Material Design 3 (`system`, `full`, `places`, `squircle`, `off`) e força do filtro (`--icon-tint`)**:
-  ```bash
-  python3 sync_theme.py --icon-mode system --icon-tint 0.90 --force
-  ```
+### Comandos Principais
 
-- **Gerar pré-visualização HTML interativa da paleta e dos ícones M3**:
-  ```bash
-  python3 sync_theme.py --preview-icons
-  ```
+```bash
+# Sincronização única com o wallpaper ativo
+python3 sync_theme.py
 
-- **Ver informações do papel de parede detectado, paleta M3 e cores calculadas**:
-  ```bash
-  python3 sync_theme.py --info
-  ```
+# Forçar reaplicação escolhendo modo e intensidade do filtro dos ícones
+python3 sync_theme.py --icon-mode system --icon-tint 0.90 --force
 
-- **Sincronizar a partir de uma imagem de wallpaper específica**:
-  ```bash
-  python3 sync_theme.py --image /caminho/para/meu_wallpaper.jpg
-  ```
+# Sobrescrever cor de destaque (#HEX) e intensidade de tint manualmente
+python3 sync_theme.py --accent "#7aa2f7" --tint 0.12 --force
 
-- **Iniciar monitoramento em tempo real**:
-  ```bash
-  python3 sync_theme.py --watch
-  ```
+# Sincronizar sem gerar/alterar ícones
+python3 sync_theme.py --no-icons
 
-- **Instalar o serviço do systemd para iniciar automaticamente com a sessão**:
-  ```bash
-  python3 sync_theme.py --install-service
-  ```
+# Gerar pré-visualização HTML da paleta M3 e dos ícones
+python3 sync_theme.py --preview-icons
 
-- **Verificar status do serviço em segundo plano**:
-  ```bash
-  systemctl --user status wallpapersync.service
-  ```
+# Exibir diagnóstico do wallpaper ativo, cor extraída e paleta M3
+python3 sync_theme.py --info
 
-- **Ver logs em tempo real**:
-  ```bash
-  journalctl --user -u wallpapersync.service -f
-  ```
+# Sincronizar a partir de uma imagem específica
+python3 sync_theme.py --image /caminho/para/wallpaper.jpg
 
-- **Reiniciar o serviço após alterações**:
-  ```bash
-  systemctl --user restart wallpapersync.service
-  ```
+# Executar daemon de monitoramento em tempo real
+python3 sync_theme.py --watch
+```
 
-- **Desinstalar apenas o serviço em segundo plano (systemd)**:
-  ```bash
-  python3 sync_theme.py --uninstall-service
-  ```
+### Gerenciamento do Serviço e Desinstalação
 
-- **Desinstalação completa (remove serviços, temas gerados, paletas e restaura aplicativos)**:
-  ```bash
-  python3 sync_theme.py --uninstall
-  ```
+```bash
+# Instalar serviço systemd do usuário
+python3 sync_theme.py --install-service
+
+# Status, logs em tempo real e reinício
+systemctl --user status wallpapersync.service
+journalctl --user -u wallpapersync.service -f
+systemctl --user restart wallpapersync.service
+
+# Remover apenas o serviço systemd
+python3 sync_theme.py --uninstall-service
+
+# Desinstalação completa (remove serviço, slots M3, paletas, Firefox e restaura .desktop/ícones originais)
+python3 sync_theme.py --uninstall
+```
+
+---
+
+## 7. Testes Automatizados
+
+Para validar a matemática de cores HCT, contraste WCAG, preservação de silhueta/alpha em PNG e SVG, ponte de AppImages e alternância de slots:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
